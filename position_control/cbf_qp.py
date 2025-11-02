@@ -1,5 +1,6 @@
 import numpy as np
 import cvxpy as cp
+# check 123
 
 class CBFQP:
     def __init__(self, robot, robot_spec, num_obs=1):
