@@ -124,6 +124,10 @@ class LocalTrackingController:
         if self.pos_controller_type == 'cbf_qp':
             from position_control.cbf_qp import CBFQP
             self.pos_controller = CBFQP(self.robot, self.robot_spec)
+        elif self.pos_controller_type == 'backup_cbf':
+            from position_control.backup_cbf_qp import BackupCBFQP
+            # pass env if you want lane info available inside the controller
+            self.pos_controller = BackupCBFQP(self.robot, self.robot_spec, num_obs=self.num_constraints, env=env)
         elif self.pos_controller_type == 'mpc_cbf':
             from position_control.mpc_cbf import MPCCBF
             self.pos_controller = MPCCBF(self.robot, self.robot_spec, show_mpc_traj=self.show_mpc_traj)
@@ -250,7 +254,7 @@ class LocalTrackingController:
     def set_unknown_obs(self, unknown_obs):
         unknown_obs = np.array(unknown_obs)
         if unknown_obs.shape[1] == 3:
-            zeros = np.zeors((unknown_obs.shape[0], 2))
+            zeros = np.zeros((unknown_obs.shape[0], 2))
             unknown_obs = np.hstack((unknown_obs, zeros))
         self.unknown_obs = unknown_obs
         for obs_info in self.unknown_obs:
@@ -859,13 +863,101 @@ def multi_agent_main(controller_type, save_animation=False):
     if save_animation:
         controller_0.export_video()
 
+def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=False):
+    """Highway scenario with backup CBF for lane-change safety"""
+    from utils.highway_env import HighwayEnv
+    from highway_controller import HighwayController
+    
+    # Create highway environment
+    env = HighwayEnv(width=60.0, height=12.0, num_lanes=3)
+    
+    # Setup plotting
+    plt.ion()
+    fig = plt.figure(figsize=(12, 6))
+    ax = plt.axes()
+    ax.set_aspect('equal')
+    
+    # Robot specification
+    robot_spec = {
+        'model': 'DynamicUnicycle2D',
+        'w_max': 0.5,
+        'a_max': 0.5,
+        'backup_trigger_dist': 6.0,
+        'backup_type': 'lane_change',
+        'lane_centers': env.lane_centers,
+        'backup_lane_index': 2,  # Target rightmost lane
+        'radius': 0.25
+    }
+
+    # Initial state [x, y, θ, v]
+    x0 = np.array([-2.0, env.lane_centers[0], 0.0, 0.0]).reshape(-1, 1)
+    
+    # Create controller
+    controller = HighwayController(
+        X0=x0,
+        robot_spec=robot_spec,
+        highway_env=env,
+        controller_type=controller_type,
+        dt=0.05,
+        show_animation=True,
+        save_animation=save_animation,
+        ax=ax,
+        fig=fig
+    )
+    
+    # Add obstacles in lanes
+    obs = np.array([
+        [20.0, env.lane_centers[0], 0.5],  # Obstacle in lane 1
+        [30.0, env.lane_centers[1], 0.5],  # Obstacle in lane 2
+    ])
+    controller.set_unknown_obs(obs)
+    
+    # Set goal in rightmost lane
+    waypoints = np.array([[55.0, env.lane_centers[2], 0.0]])
+    controller.set_waypoints(waypoints)
+
+    # Force tracking even if goal is outside FoV so the control loop runs
+    controller.goal = np.array(waypoints[0][:2]).reshape(-1, 1)
+    controller.state_machine = 'track'
+    
+    # Run simulation
+    try:
+        while not controller.has_reached_goal():
+            controller.control_step()
+            if controller.show_animation:
+                # Update highway visualization
+                env.render_lanes(ax, controller.robot.get_position()[0])
+                controller.draw_plot()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if save_animation:
+            controller.export_video()
+        plt.ioff()
+        plt.show()    
+
 
 if __name__ == "__main__":
     from utils import plotting
     from utils import env
     import math
 
-    #single_agent_main(controller_type={'pos': 'cbf_qp'})
-    single_agent_main(controller_type={'pos': 'mpc_cbf'})
-    # single_agent_main(controller_type={'pos': 'mpc_cbf', 'att': 'gatekeeper'}) # only Integrators have attitude controller, otherwise ignored
+    # ------- simple runtime flags (toggle here) -------
+    RUN_HIGHWAY = True      # set to True to run highway_scenario_main
+    RUN_SINGLE  = False     # set to True to run single_agent_main
+    RUN_MULTI   = False     # set to True to run multi_agent_main
+    SAVE_ANIM   = False     # set to True to save animation output
+    # --------------------------------------------------
+
+    if RUN_HIGHWAY:
+        highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=SAVE_ANIM)
+    elif RUN_MULTI:
+        multi_agent_main(controller_type={'pos': 'backup_cbf'}, save_animation=SAVE_ANIM)
+    elif RUN_SINGLE:
+        single_agent_main(controller_type={'pos': 'backup_cbf'})
+    else:
+        #single_agent_main(controller_type={'pos': 'cbf_qp'})
+        #single_agent_main(controller_type={'pos': 'mpc_cbf'})
+        single_agent_main(controller_type={'pos': 'backup_cbf'})
+        # single_agent_main(controller_type={'pos': 'mpc_cbf', 'att': 'gatekeeper'}) # only Integrators have attitude controller, otherwise ignored
     
