@@ -1,3 +1,4 @@
+import math
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -39,8 +40,10 @@ class LocalTrackingController:
                  enable_rotation=True, raise_error=False,
                  ax=None, fig=None, env=None):
 
+        controller_type = controller_type or {}
         self.robot_spec = robot_spec
         self.pos_controller_type = controller_type.get('pos', 'cbf_qp')  # 'cbf_qp' or 'mpc_cbf'
+
         self.att_controller_type = controller_type.get('att', 'velocity_tracking_yaw')  # 'simple' or 'velocity_tracking_yaw'
         self.dt = dt
 
@@ -108,7 +111,13 @@ class LocalTrackingController:
 
         self.ax = ax
         self.fig = fig
-        self.obs = np.array(env.obs_circle)
+        self.env = env
+        if env and getattr(env, "obs_circle", None):
+            self.obs = np.array(env.obs_circle, dtype=float)
+            if self.obs.ndim == 1:
+                self.obs = self.obs.reshape(1, -1)
+        else:
+            self.obs = np.empty((0, 7))
         
         self.known_obs = np.array([])
         self.unknown_obs = np.array([])
@@ -207,7 +216,7 @@ class LocalTrackingController:
         self.goal = self.update_goal()
         if self.goal is not None:
             if not self.robot.is_in_fov(self.goal):
-                if self.robot_spec['exploration']:
+                if self.robot_spec.get('exploration', False):
                     # when tracking class used in exploration scenario,
                     # the goal is updated usually when the robot is far away from the unsafe area (considering sensing range)
                     self.state_machine = 'rotate'
@@ -252,7 +261,12 @@ class LocalTrackingController:
         return self.goal is None
 
     def set_unknown_obs(self, unknown_obs):
-        unknown_obs = np.array(unknown_obs)
+        unknown_obs = np.array(unknown_obs, dtype=float)
+        if unknown_obs.size == 0:
+            self.unknown_obs = np.empty((0, 5))
+            return
+        if unknown_obs.ndim == 1:
+            unknown_obs = unknown_obs.reshape(1, -1)
         if unknown_obs.shape[1] == 3:
             zeros = np.zeros((unknown_obs.shape[0], 2))
             unknown_obs = np.hstack((unknown_obs, zeros))

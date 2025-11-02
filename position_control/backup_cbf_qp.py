@@ -60,12 +60,13 @@ class BackupCBFQP:
         except Exception:
             self.cbf_controller = cp.Problem(objective, constraints)
 
-    def compute_backup_ref(self):
+    def compute_backup_ref(self, X=None):
         """Return (2,1) backup reference control: stop or simple lane-change"""
+        state = self.robot.X if X is None else np.array(X, dtype=float).reshape(-1, 1)
+
         # emergency stop reference (DynamicUnicycle2D: [accel, omega])
         if self.backup_type == 'stop' or self.robot_spec['model'] != 'DynamicUnicycle2D':
-            # ask robot model for stop command (robot.stop expects X)
-            return self.robot.stop(self.robot.X)
+            return self.robot.robot.stop(state)
         # lane change reference
         if self.backup_type == 'lane_change':
             lane_centers = self.lane_centers
@@ -76,8 +77,7 @@ class BackupCBFQP:
             idx = self.backup_lane_index if self.backup_lane_index is not None else (len(lane_centers)-1)
             target_y = lane_centers[idx]
 
-            X = self.robot.X.reshape(-1, 1)
-            px, py, theta, v = float(X[0,0]), float(X[1,0]), float(X[2,0]), float(X[3,0])
+            px, py, theta, v = (float(state[0, 0]), float(state[1, 0]), float(state[2, 0]), float(state[3, 0]))
             forward_x = px + max(1.0, 1.5*v)
             desired_theta = np.arctan2(target_y - py, forward_x - px)
             yaw_err = ((desired_theta - theta + np.pi) % (2*np.pi)) - np.pi
@@ -86,8 +86,8 @@ class BackupCBFQP:
             desired_v = 0.2
             k_a = 1.0
             accel = k_a * (desired_v - v)
-            return np.array([accel, omega]).reshape(-1,1)
-        return self.robot.stop(self.robot.X)
+            return np.array([accel, omega]).reshape(-1, 1)
+        return self.robot.robot.stop(state)
 
     def compute_backup_trajectory(self, X0):
         """
@@ -97,14 +97,12 @@ class BackupCBFQP:
         """
         n = X0.reshape(-1,1).shape[0]
         phi = np.zeros((self.T + 1, n))
-        phi[0,:] = X0.reshape(-1)
-        X_cur = X0.copy()
+        X_cur = np.array(X0, dtype=float).reshape(-1, 1)
+        phi[0, :] = X_cur.flatten()
         for t in range(self.T):
-            u_b = self.compute_backup_ref()
-            # simulate one step (robot.step expects (n,1), (m,1))
-            X_next = self.robot.step(X_cur, u_b)
-            phi[t+1,:] = X_next.reshape(-1)
-            X_cur = X_next
+            u_b = self.compute_backup_ref(X_cur)
+            X_cur = self.robot.robot.step(X_cur.copy(), u_b)
+            phi[t + 1, :] = X_cur.flatten()
         return phi
 
     def solve_control_problem(self, robot_state, control_ref, obs_list):
@@ -146,9 +144,6 @@ class BackupCBFQP:
         phi = self.compute_backup_trajectory(robot_state)
 
         # current dynamics evaluation
-        fx0 = self.robot.f()
-        gx0 = self.robot.g()
-
         A_list = []
         b_list = []
 
@@ -157,9 +152,14 @@ class BackupCBFQP:
             if obs is None:
                 return None
             # robot.agent_barrier(X, obs, robot_radius) returns (h, h_dot, dh_dot_dx)
-            h, h_dot, dh_dot_dx = self.robot.agent_barrier(x_state.reshape(-1,1), obs, self.robot.robot_radius)
-            Arow = (dh_dot_dx @ self.robot.g()).reshape(-1)
-            brow = (-(dh_dot_dx @ self.robot.f()) - (self.cbf_param['alpha1'] + self.cbf_param['alpha2'])*h_dot - self.cbf_param['alpha1']*self.cbf_param['alpha2']*h).reshape(-1,1)
+            x_state = np.array(x_state, dtype=float).reshape(-1, 1)
+            h, h_dot, dh_dot_dx = self.robot.robot.agent_barrier(x_state, obs, self.robot.robot_radius)
+            g_mat = self.robot.robot.g(x_state)
+            f_vec = self.robot.robot.f(x_state)
+            Arow = (dh_dot_dx @ g_mat).reshape(-1)
+            brow = (-(dh_dot_dx @ f_vec)
+                    - (self.cbf_param['alpha1'] + self.cbf_param['alpha2']) * h_dot
+                    - self.cbf_param['alpha1'] * self.cbf_param['alpha2'] * h).reshape(-1, 1)
             return Arow, brow
 
         # current-state constraint (use nearest_obs if exists)
@@ -169,9 +169,8 @@ class BackupCBFQP:
                 A_list.append(c[0])
                 b_list.append(c[1])
         else:
-            # no obstacle: put a trivial non-binding constraint row (zeros <= big number)
             A_list.append(np.zeros((2,)))
-            b_list.append(np.array([[ -1e6 ]]))
+            b_list.append(np.array([[1e6]]))
 
         # future constraints along phi
         for t in range(self.T):
@@ -183,7 +182,7 @@ class BackupCBFQP:
                     b_list.append(c[1])
             else:
                 A_list.append(np.zeros((2,)))
-                b_list.append(np.array([[ -1e6 ]]))
+                b_list.append(np.array([[1e6]]))
 
         # fill parameter values
         A_mat = np.vstack(A_list)
