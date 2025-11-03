@@ -134,9 +134,9 @@ class LocalTrackingController:
             from position_control.cbf_qp import CBFQP
             self.pos_controller = CBFQP(self.robot, self.robot_spec)
         elif self.pos_controller_type == 'backup_cbf':
-            from position_control.backup_cbf_qp import BackupCBFQP
-            # pass env if you want lane info available inside the controller
-            self.pos_controller = BackupCBFQP(self.robot, self.robot_spec, num_obs=self.num_constraints, env=env)
+            # The backup ASIF is handled directly by HighwayController
+            # so we do not create a position controller here.
+            self.pos_controller = None
         elif self.pos_controller_type == 'mpc_cbf':
             from position_control.mpc_cbf import MPCCBF
             self.pos_controller = MPCCBF(self.robot, self.robot_spec, show_mpc_traj=self.show_mpc_traj)
@@ -525,13 +525,18 @@ class LocalTrackingController:
         control_ref = {'state_machine': self.state_machine,
                        'u_ref': u_ref,
                        'goal': self.goal}
-        
-        if self.pos_controller_type in ['optimal_decay_cbf_qp', 'cbf_qp']:
+
+        if self.pos_controller_type == 'backup_cbf':
+            u = u_ref
+            pos_status = 'optimal'
+        elif self.pos_controller_type in ['optimal_decay_cbf_qp', 'cbf_qp']:
             u = self.pos_controller.solve_control_problem(
-                self.robot.X, control_ref, self.nearest_multi_obs) 
+                    self.robot.X, control_ref, self.nearest_multi_obs)
+            pos_status = getattr(self.pos_controller, 'status', 'unknown')
         else:
             u = self.pos_controller.solve_control_problem(
-                self.robot.X, control_ref, self.nearest_multi_obs)
+                    self.robot.X, control_ref, self.nearest_multi_obs)
+            pos_status = getattr(self.pos_controller, 'status', 'unknown')
         plt.figure(self.fig.number)
 
         # 6. Update the attitude controller
@@ -542,7 +547,7 @@ class LocalTrackingController:
 
         # 7. Raise an error if the QP is infeasible, or the robot collides with the obstacle
         collide = self.is_collide_unknown()
-        if self.pos_controller.status != 'optimal' or collide:
+        if pos_status != 'optimal' or collide:
             cause = "Collision" if collide else "Infeasible"
             self.draw_infeasible()
             print(f"{cause} detected !!")
@@ -638,10 +643,15 @@ class LocalTrackingController:
             # print(f"Control input: {control_input}")
 
             if write_csv:
-                # append the states, control inputs, and CBF parameters by appending to csv
+                row = np.append(robot_state, control_input)
+                if self.pos_controller is not None and hasattr(self.pos_controller, 'cbf_param'):
+                    row = np.append(row, [
+                        self.pos_controller.cbf_param.get('alpha1', 0.0),
+                        self.pos_controller.cbf_param.get('alpha2', 0.0)
+                    ])
                 with open('output.csv', 'a', newline='') as csvfile:
                     writer = csv.writer(csvfile)
-                    writer.writerow(np.append(robot_state, np.append(control_input, [self.pos_controller.cbf_param['alpha1'], self.pos_controller.cbf_param['alpha2']])))
+                    writer.writerow(row)
 
 
             if ret == -1 or ret == -2:  # all waypoints reached
@@ -926,6 +936,8 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
     # Nominal plan: stay in lane 1 and drive straight
     waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
+    controller.state_machine = 'track'
+
     controller.init_traffic([
         {
             "x": 10.0,

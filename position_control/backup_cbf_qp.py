@@ -1,216 +1,225 @@
 import numpy as np
-import cvxpy as cp
+import quadprog
 
-class BackupCBFQP:
+
+class BackupASIF:
     """
-    Practical backup-CBF QP for DynamicUnicycle2D.
-    Implements T+1 constraints along a simulated backup trajectory and uses
-    a backup reference (stop or lane_change) when triggered by a nearby obstacle.
+    Plain (non-robust) backup ASIF.
+    - Simulates the backup controller (lane 3 + brake) for a fixed horizon.
+    - Propagates the sensitivity matrix for each time slice.
+    - Enforces safety and terminal reachability constraints.
+    - Filters the nominal control with a 2×2 QP.
     """
 
-    def __init__(self, robot, robot_spec, num_obs=1, env=None):
-        self.robot = robot
+    def __init__(self, robot, robot_spec):
+        self.robot = robot                # robots.robot.BaseRobot instance
         self.robot_spec = robot_spec
-        self.num_obs = num_obs
-        self.env = env
 
-        # backup settings (tune)
-        self.trigger_distance = robot_spec.get('backup_trigger_dist', 6.0)
-        self.backup_type = robot_spec.get('backup_type', 'stop')
-        self.lane_centers = robot_spec.get('lane_centers', None)
-        self.backup_lane_index = robot_spec.get('backup_lane_index', None)
+        self.nx = self.robot.X.shape[0]
+        self.nu = self.robot.U.shape[0]
 
-        # CBF params
-        if self.robot_spec['model'] == 'DynamicUnicycle2D':
-            self.cbf_param = {'alpha1': 1.5, 'alpha2': 1.5}
-        else:
-            self.cbf_param = {'alpha': 1.0}
+        # Horizon and integration step
+        self.dt = self.robot.dt
+        self.backup_time = 1.5
+        self.N = int(np.ceil(self.backup_time / self.dt))
 
-        # qp / problem placeholders
-        self.T = 8
-        self.u = None
-        self.u_ref = None
-        self.A = None
-        self.b = None
-        self.cbf_controller = None
-        self.status = 'unknown'
+        # Tightening parameters (non-robust)
+        self.Lh_const = 1.0
+        self.Lhb_const = 1.0
+        self.sup_fcl = 6.0
+        self.u_max = self.robot_spec.get("a_max", 1.0)
 
-        self.setup_control_problem()
+        # Lane-change target
+        lane_centers = self.robot_spec.get("lane_centers", [0.0, 3.0, 6.0])
+        self.target_lane_idx = self.robot_spec.get("backup_lane_index", 2)
+        self.target_lane = lane_centers[self.target_lane_idx]
+        self.target_speed = 0.0
+        self.lane_margin = 0.25
 
-    def setup_control_problem(self):
-        """Setup the T+1 constraint QP"""
-        # keep T small for interactive demo
-        self.T = int(self.T)
-        self.u = cp.Variable((2, 1))
-        self.u_ref = cp.Parameter((2, 1), value=np.zeros((2, 1)))
-        # T future + 1 current constraints
-        self.A = cp.Parameter((self.T + 1, 2), value=np.zeros((self.T + 1, 2)))
-        self.b = cp.Parameter((self.T + 1, 1), value=np.zeros((self.T + 1, 1)))
+    # ------------------------------------------------------------------
+    # Core dynamics helpers
+    # ------------------------------------------------------------------
+    def f(self, x):
+        return self.robot.robot.f(x.reshape(-1, 1)).flatten()
 
-        objective = cp.Minimize(cp.sum_squares(self.u - self.u_ref))
-        constraints = [
-            self.A @ self.u + self.b >= 0,
-            cp.abs(self.u[0]) <= self.robot_spec.get('a_max', 1.0),
-            cp.abs(self.u[1]) <= self.robot_spec.get('w_max', 1.0)
-        ]
+    def g(self, x):
+        return self.robot.robot.g(x.reshape(-1, 1))
 
-        # fall back solver choice if GUROBI not available
+    def df_dx(self, x):
+        if hasattr(self.robot.robot, "df_dx"):
+            return self.robot.robot.df_dx(x.reshape(-1, 1))
+        return self._finite_difference(self.f, x)
+
+    def dg_dx(self, x):
+        if hasattr(self.robot.robot, "dg_dx"):
+            return self.robot.robot.dg_dx(x.reshape(-1, 1))
+        return np.zeros((self.nu, self.nx, self.nx))
+
+    @staticmethod
+    def _finite_difference(func, x, eps=1e-5):
+        x = np.array(x, dtype=float)
+        base = func(x.copy())
+        jac = np.zeros((base.size, x.size))
+        for i in range(x.size):
+            x_pert = x.copy()
+            x_pert[i] += eps
+            jac[:, i] = (func(x_pert) - base) / eps
+        return jac
+
+    # ------------------------------------------------------------------
+    # Backup controller (lane change)
+    # ------------------------------------------------------------------
+    def backup_control(self, x):
+        x = x.reshape(-1)
+        px, py, theta, v = x[:4]
+
+        # Lateral error
+        y_err = self.target_lane - py
+        k_lat = 1.5
+        omega = k_lat * y_err
+
+        # Decelerate to target speed
+        accel = 1.5 * (self.target_speed - v)
+        return np.array([[accel], [omega]])
+
+    # ------------------------------------------------------------------
+    # Combined backup flow for [x; vec(S)]
+    # ------------------------------------------------------------------
+    def backup_flow(self, z):
+        x = z[:self.nx]
+        S = z[self.nx:].reshape(self.nx, self.nx)
+
+        f_val = self.f(x).reshape(-1)              # ensure 1-D
+        g_val = self.g(x)
+        u_b = self.backup_control(x)
+
+        # x_dot
+        x_dot = f_val + (g_val @ u_b).reshape(-1)  # 1-D forward dynamics
+
+        # S_dot = (df/dx + dg/dx * u_b) * S
+        df = self.df_dx(x)
+        dg = self.dg_dx(x)
+        A = df.copy()
+        for i in range(self.nu):
+            A += dg[i] * u_b[i, 0]
+        S_dot = (A @ S).reshape(-1)                # flatten sensitivity
+        return np.concatenate([x_dot, S_dot.flatten()])
+
+    def integrate_backup(self, x0):
+        """
+        Integrate x and S over the backup horizon.
+        """
+        phi = np.zeros((self.N, self.nx))
+        S_all = np.zeros((self.N, self.nx, self.nx))
+
+        z = np.concatenate([x0.flatten(), np.eye(self.nx).flatten()])
+        phi[0] = x0.flatten()
+        S_all[0] = np.eye(self.nx)
+
+        for i in range(1, self.N):
+            z = z + self.dt * self.backup_flow(z)
+            phi[i] = z[:self.nx]
+            S_all[i] = z[self.nx:].reshape(self.nx, self.nx)
+
+        return phi, S_all
+
+    # ------------------------------------------------------------------
+    # CBF definitions
+    # ------------------------------------------------------------------
+    def h_safety(self, x, obs, robot_radius):
+        px, py = x[:2]
+        ox, oy, r = obs[:3]
+        combined = r + robot_radius
+        return (px - ox) ** 2 + (py - oy) ** 2 - combined ** 2
+
+    def grad_h_safety(self, x, obs):
+        px, py = x[:2]
+        ox, oy = obs[:2]
+        grad = np.zeros(self.nx)
+        grad[0] = 2.0 * (px - ox)
+        grad[1] = 2.0 * (py - oy)
+        return grad
+
+    def h_backup(self, x):
+        _, py, _, v = x[:4]
+        lane_err = py - self.target_lane
+        speed_err = v - self.target_speed
+        return -0.5 * (lane_err ** 2 + speed_err ** 2 - self.lane_margin ** 2)
+
+    def grad_h_backup(self, x):
+        grad = np.zeros(self.nx)
+        grad[1] = -(x[1] - self.target_lane)
+        grad[3] = -(x[3] - self.target_speed)
+        return grad
+
+    def alpha(self, x):
+        return 15.0 * x + x ** 3
+
+    def alpha_b(self, x):
+        return 10.0 * x
+
+    # ------------------------------------------------------------------
+    # Main ASIF
+    # ------------------------------------------------------------------
+    def asif(self, x_curr, u_des, obs_vec):
+        """
+        x_curr: current state (nx,)
+        u_des : nominal control (nu,)
+        obs_vec: obstacle parameters (at least [x, y, radius, vx, vy])
+        returns: u_filtered (nu,), intervening flag
+        """
+        x_curr = np.array(x_curr, dtype=float)
+        u_des = np.array(u_des, dtype=float)
+        phi, S_all = self.integrate_backup(x_curr)
+
+        f0 = self.f(x_curr)
+        g0 = self.g(x_curr)
+
+        # QP variables
+        M = np.eye(self.nu)
+        q = u_des.copy()
+
+        G_list = []
+        h_list = []
+
+        # Discretization tightening
+        mu_d = 0.5 * self.dt * self.Lh_const * self.sup_fcl
+        robot_radius = getattr(self.robot, "robot_radius", 0.3)
+
+        # Future safety constraints
+        for i in range(1, self.N):
+            x_i = phi[i]
+            S_i = S_all[i]
+
+            h_val = self.h_safety(x_i, obs_vec, robot_radius)
+            grad_h = self.grad_h_safety(x_i, obs_vec)
+
+            lhs = grad_h @ S_i @ g0
+            rhs = -(grad_h @ S_i @ f0 + self.alpha(h_val - mu_d))
+            G_list.append(lhs)
+            h_list.append(rhs)
+
+        # Terminal reachability
+        x_T = phi[-1]
+        S_T = S_all[-1]
+
+        hb_val = self.h_backup(x_T)
+        grad_hb = self.grad_h_backup(x_T)
+
+        lhs = grad_hb @ S_T @ g0
+        rhs = -(grad_hb @ S_T @ f0 + self.alpha_b(hb_val))
+        G_list.append(lhs)
+        h_list.append(rhs)
+
+        G = np.array(G_list)
+        h = np.array(h_list)
+
         try:
-            self.cbf_controller = cp.Problem(objective, constraints)
+            sol = quadprog.solve_qp(M, q, G.T, h, 0)
+            u_act = sol[0]
         except Exception:
-            self.cbf_controller = cp.Problem(objective, constraints)
+            u_act = u_des.copy()
 
-    def compute_backup_ref(self, X=None):
-        """Return (2,1) backup reference control: stop or simple lane-change"""
-        state = self.robot.X if X is None else np.array(X, dtype=float).reshape(-1, 1)
-
-        # emergency stop reference (DynamicUnicycle2D: [accel, omega])
-        if self.backup_type == 'stop' or self.robot_spec['model'] != 'DynamicUnicycle2D':
-            return self.robot.robot.stop(state)
-        # lane change reference
-        if self.backup_type == 'lane_change':
-            lane_centers = self.lane_centers
-            if lane_centers is None and self.env is not None and hasattr(self.env, 'lane_centers'):
-                lane_centers = self.env.lane_centers
-            if lane_centers is None:
-                return self.robot.stop(self.robot.X)
-            idx = self.backup_lane_index if self.backup_lane_index is not None else (len(lane_centers)-1)
-            target_y = lane_centers[idx]
-
-            px, py, theta, v = (float(state[0, 0]), float(state[1, 0]), float(state[2, 0]), float(state[3, 0]))
-            forward_x = px + max(1.0, 1.5*v)
-            desired_theta = np.arctan2(target_y - py, forward_x - px)
-            yaw_err = ((desired_theta - theta + np.pi) % (2*np.pi)) - np.pi
-            k_omega = 2.0
-            omega = k_omega * yaw_err
-            desired_v = 0.2
-            k_a = 1.0
-            accel = k_a * (desired_v - v)
-            return np.array([accel, omega]).reshape(-1, 1)
-        return self.robot.robot.stop(state)
-
-    def compute_backup_trajectory(self, X0):
-        """
-        Simulate backup trajectory under the backup policy starting from X0.
-        Returns phi: (T+1, n_x) states array.
-        Uses robot.step() wrapper which expects (n,1) arrays.
-        """
-        n = X0.reshape(-1,1).shape[0]
-        phi = np.zeros((self.T + 1, n))
-        X_cur = np.array(X0, dtype=float).reshape(-1, 1)
-        phi[0, :] = X_cur.flatten()
-        for t in range(self.T):
-            u_b = self.compute_backup_ref(X_cur)
-            X_cur = self.robot.robot.step(X_cur.copy(), u_b)
-            phi[t + 1, :] = X_cur.flatten()
-        return phi
-
-    def solve_control_problem(self, robot_state, control_ref, obs_list):
-        """
-        Build T+1 CBF linear constraints and solve QP to return safe control.
-        robot_state: current state (n,1)
-        control_ref: dict with 'u_ref' (2x1)
-        obs_list: list/array of obstacles (may be None)
-        """
-        # build nominal/ref selection: detect nearest obstacle and trigger backup
-        use_backup = False
-        nearest_obs = None
-        if obs_list is not None and len(obs_list) > 0:
-            # ensure shape
-            obs_arr = np.array(obs_list)
-            if obs_arr.ndim == 1:
-                obs_arr = obs_arr.reshape(1, -1)
-            robot_pos = self.robot.get_position()
-            dists = np.linalg.norm(obs_arr[:, :2] - robot_pos, axis=1)
-            idx = int(np.argmin(dists))
-            nearest_obs = obs_arr[idx]
-            if dists[idx] <= self.trigger_distance:
-                # front check
-                heading = np.array([np.cos(self.robot.get_orientation()), np.sin(self.robot.get_orientation())])
-                rel = nearest_obs[:2] - robot_pos
-                if np.dot(rel, heading) > 0:
-                    use_backup = True
-
-        if use_backup:
-            u_ref_val = self.compute_backup_ref()
-        else:
-            # control_ref may be a dict; if user passed u_ref param directly handle both
-            if isinstance(control_ref, dict) and 'u_ref' in control_ref:
-                u_ref_val = control_ref['u_ref']
-            else:
-                u_ref_val = control_ref
-
-        # compute backup trajectory phi
-        phi = self.compute_backup_trajectory(robot_state)
-
-        # cache the controller time step
-        dt = self.robot.dt
-
-        # current dynamics evaluation
-        A_list = []
-        b_list = []
-
-        # helper to safely compute barrier constraints for a state x and an obstacle
-        def make_constraint(x_state, obs):
-            if obs is None:
-                return None
-            # robot.agent_barrier(X, obs, robot_radius) returns (h, h_dot, dh_dot_dx)
-            x_state = np.array(x_state, dtype=float).reshape(-1, 1)
-            h, h_dot, dh_dot_dx = self.robot.robot.agent_barrier(x_state, obs, self.robot.robot_radius)
-            g_mat = self.robot.robot.g(x_state)
-            f_vec = self.robot.robot.f(x_state)
-            Arow = (dh_dot_dx @ g_mat).reshape(-1)
-            brow = (-(dh_dot_dx @ f_vec)
-                    - (self.cbf_param['alpha1'] + self.cbf_param['alpha2']) * h_dot
-                    - self.cbf_param['alpha1'] * self.cbf_param['alpha2'] * h).reshape(-1, 1)
-            return Arow, brow
-
-        # current-state constraint (use nearest_obs if exists)
-        if nearest_obs is not None:
-            c = make_constraint(robot_state, nearest_obs)
-            if c is not None:
-                A_list.append(c[0])
-                b_list.append(c[1])
-        else:
-            A_list.append(np.zeros((2,)))
-            b_list.append(np.array([[1e6]]))
-
-        # future constraints along phi
-        for t in range(self.T):
-            x_t = phi[t, :].reshape(-1, 1)
-            if nearest_obs is not None:
-                obs_future = nearest_obs.astype(float).copy()
-                obs_future[0] += obs_future[3] * dt * (t + 1)
-                obs_future[1] += obs_future[4] * dt * (t + 1)
-                c = make_constraint(x_t, obs_future)
-                if c is not None:
-                    A_list.append(c[0])
-                    b_list.append(c[1])
-            else:
-                A_list.append(np.zeros((2,)))
-                b_list.append(np.array([[1e6]]))
-
-        # fill parameter values
-        A_mat = np.vstack(A_list)
-        b_mat = np.vstack(b_list)
-        # ensure shapes match parameter initializations
-        self.A.value = A_mat
-        self.b.value = b_mat
-        self.u_ref.value = u_ref_val.reshape(2,1)
-
-        # solve QP
-        try:
-            # prefer GUROBI if installed
-            self.cbf_controller.solve(solver=cp.GUROBI, warm_start=True)
-        except Exception:
-            try:
-                self.cbf_controller.solve(solver=cp.OSQP, warm_start=True)
-            except Exception as e:
-                self.status = 'failed'
-                return u_ref_val.reshape(2,1)
-
-        self.status = self.cbf_controller.status
-        u_out = self.u.value
-        if u_out is None:
-            return u_ref_val.reshape(2,1)
-        return u_out
+        u_act = np.clip(u_act, -self.u_max, self.u_max)
+        intervening = np.linalg.norm(u_act - u_des) > 1e-4
+        return u_act, intervening
