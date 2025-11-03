@@ -97,6 +97,13 @@ class DynamicUnicycle2D:
         accel = k_a * (v - X[3, 0])
         # print(f"CBF nominal acc: {accel}, omega:{omega}")
         return np.array([accel, omega]).reshape(-1, 1)
+    
+    def nominal_input_constant_speed(self, X, target_speed=2.0, k_a=1.0):
+        """Hold current yaw, regulate forward speed to target_speed."""
+        desired_v = float(target_speed)
+        accel = k_a * (desired_v - X[3, 0])
+        omega = 0.0
+        return np.array([accel, omega]).reshape(-1, 1)   
 
     def stop(self, X, k_a=1.0):
         # set desired velocity to zero

@@ -513,7 +513,10 @@ class LocalTrackingController:
             u_ref = self.robot.stop()
         else:
             # Normal waypoint tracking
-            if self.pos_controller_type == 'optimal_decay_cbf_qp':
+            if self.pos_controller_type == 'backup_cbf':
+                u_ref = self.robot.nominal_input_constant_speed(
+                    target_speed=self.robot_spec.get('v_nominal', 2.0))
+            elif self.pos_controller_type == 'optimal_decay_cbf_qp':
                 u_ref = self.robot.nominal_input(self.goal, k_omega=3.0, k_a=0.5, k_v=0.5)
             else:
                 u_ref = self.robot.nominal_input(self.goal)
@@ -900,7 +903,8 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
         'backup_type': 'lane_change',
         'lane_centers': env.lane_centers,
         'backup_lane_index': 2,  # Target rightmost lane
-        'radius': 0.25
+        'radius': 0.25,
+        'v_nominal': 2.0,   # constant forward speed (m/s)
     }
 
     # Initial state [x, y, θ, v]
@@ -919,20 +923,18 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
         fig=fig
     )
     
-    # Add obstacles in lanes
-    obs = np.array([
-        [20.0, env.lane_centers[0], 0.5],  # Obstacle in lane 1
-        [30.0, env.lane_centers[1], 0.5],  # Obstacle in lane 2
-    ])
-    controller.set_unknown_obs(obs)
-    
-    # Set goal in rightmost lane
-    waypoints = np.array([[55.0, env.lane_centers[2], 0.0]])
+    # Nominal plan: stay in lane 1 and drive straight
+    waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
-
-    # Force tracking even if goal is outside FoV so the control loop runs
-    controller.goal = np.array(waypoints[0][:2]).reshape(-1, 1)
-    controller.state_machine = 'track'
+    controller.init_traffic([
+        {
+            "x": 10.0,
+            "y": env.lane_centers[1],
+            "radius": 0.5,
+            "vx": 0.5  # m/s speed for the slower car
+        }
+    ])
+    controller.unknown_obs = np.empty((0, 5))
     
     # Run simulation
     try:
@@ -940,7 +942,6 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
             controller.control_step()
             if controller.show_animation:
                 # Update highway visualization
-                env.render_lanes(ax, controller.robot.get_position()[0])
                 controller.draw_plot()
     except KeyboardInterrupt:
         pass

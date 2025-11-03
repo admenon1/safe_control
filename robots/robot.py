@@ -362,6 +362,15 @@ class BaseRobot:
             # these three have quite complex nominal input
             # so recommend to tune gains inside of each script
             return self.robot.nominal_input(self.X, goal)
+        
+    def nominal_input_constant_speed(self, target_speed=2.0, k_a=1.0):
+        if hasattr(self.robot, "nominal_input_constant_speed"):
+            return self.robot.nominal_input_constant_speed(
+                self.X, target_speed=target_speed, k_a=k_a
+            )
+        raise NotImplementedError(
+            f"{self.robot.__class__.__name__} does not implement nominal_input_constant_speed"
+        )
 
     def nominal_attitude_input(self, theta_des):
         if self.robot_spec['model'] in ['SingleIntegrator2D', 'DoubleIntegrator2D']:

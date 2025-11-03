@@ -143,6 +143,9 @@ class BackupCBFQP:
         # compute backup trajectory phi
         phi = self.compute_backup_trajectory(robot_state)
 
+        # cache the controller time step
+        dt = self.robot.dt
+
         # current dynamics evaluation
         A_list = []
         b_list = []
@@ -174,9 +177,12 @@ class BackupCBFQP:
 
         # future constraints along phi
         for t in range(self.T):
-            x_t = phi[t,:].reshape(-1,1)
+            x_t = phi[t, :].reshape(-1, 1)
             if nearest_obs is not None:
-                c = make_constraint(x_t, nearest_obs)
+                obs_future = nearest_obs.astype(float).copy()
+                obs_future[0] += obs_future[3] * dt * (t + 1)
+                obs_future[1] += obs_future[4] * dt * (t + 1)
+                c = make_constraint(x_t, obs_future)
                 if c is not None:
                     A_list.append(c[0])
                     b_list.append(c[1])
