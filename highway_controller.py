@@ -27,18 +27,15 @@ class HighwayController(LocalTrackingController):
         rows = []
         patches_list = []
         for car in traffic_spec:
-            rows.append([
-                car["x"], car["y"], car["radius"],
-                car.get("vx", 0.0), car.get("vy", 0.0),
-                0.0, 0.0
-            ])
+            rows.append([car["x"], car["y"], car["radius"],
+                         car.get("vx", 0.0), car.get("vy", 0.0), 0.0, 0.0])
             patch = self.ax.add_patch(
-                patches.Rectangle(
-                    (car["x"] - 0.9, car["y"] - 0.4),
-                    1.8, 0.8,
-                    facecolor="gray",
+                patches.Circle(
+                    (car["x"], car["y"]),
+                    car["radius"],
+                    facecolor="blue",
                     edgecolor="black",
-                    alpha=0.8,
+                    alpha=0.7,
                     zorder=3
                 )
             )
@@ -59,9 +56,8 @@ class HighwayController(LocalTrackingController):
             self.obs[idx, 1] = car["y"]
 
             if idx < len(self._traffic_patches):
-                rect = self._traffic_patches[idx]
-                rect.set_x(car["x"] - 0.9)
-                rect.set_y(car["y"] - 0.4)
+                circle = self._traffic_patches[idx]
+                circle.center = (car["x"], car["y"])
 
     def control_step(self):
         self._advance_traffic()
@@ -70,6 +66,9 @@ class HighwayController(LocalTrackingController):
         u_des = self.robot.nominal_input_constant_speed(
             target_speed=self.robot_spec.get('v_nominal', 2.0)
         ).flatten()
+
+        # u_bound = self.asif_filter.u_max (Attempt to not let backup activate in the beginning)
+        # u_des = np.clip(u_des, -u_bound, u_bound)
 
         # guard with the nearest obstacle
         if self.obs.size > 0:

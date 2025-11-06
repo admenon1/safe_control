@@ -41,9 +41,11 @@ class BaseRobot:
         self.robot_spec.setdefault('robot_id', 0)
         self.robot_spec.setdefault('exploration', False)
 
-        colors = plt.colormaps.get_cmap('Pastel1').colors  # color palette
+        # colors = plt.colormaps.get_cmap('Pastel1').colors  # color palette
 
-        color = colors[self.robot_spec['robot_id'] % len(colors) + 1]
+        # color = colors[self.robot_spec['robot_id'] % len(colors) + 1] (Commented for keeping the ego car RED)
+
+        color = 'red'
 
         self.robot_spec.setdefault('radius', 0.25)
         self.robot_radius = self.robot_spec['radius']  # including padding

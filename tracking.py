@@ -913,7 +913,7 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
         'backup_type': 'lane_change',
         'lane_centers': env.lane_centers,
         'backup_lane_index': 2,  # Target rightmost lane
-        'radius': 0.25,
+        'radius': 0.5,
         'v_nominal': 2.0,   # constant forward speed (m/s)
     }
 
@@ -952,6 +952,9 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
     try:
         while not controller.has_reached_goal():
             controller.control_step()
+            # stop once the ego car reaches x = 55
+            if controller.robot.X[0, 0] >= 55.0:
+                break
             if controller.show_animation:
                 # Update highway visualization
                 controller.draw_plot()

@@ -44,19 +44,19 @@ class HighwayEnv(Env):
             created.append(line1)
             created.append(line2)
 
-        # Draw safe area rectangle if inside view
-        sx = self.safe_area['x']
-        if sx >= x0 - 1.0 and sx <= x1 + 1.0:
-            safe_rect = patches.Rectangle(
-                (self.safe_area['x'], self.safe_area['y'] - self.safe_area['h'] / 2),
-                self.safe_area['w'],
-                self.safe_area['h'],
-                facecolor='lightgreen',
-                edgecolor='green',
-                alpha=0.35,
-                zorder=1
-            )
-            ax.add_patch(safe_rect)
-            created.append(safe_rect)
+        # # Draw safe area rectangle if inside view
+        # sx = self.safe_area['x']
+        # if sx >= x0 - 1.0 and sx <= x1 + 1.0:
+        #     safe_rect = patches.Rectangle(
+        #         (self.safe_area['x'], self.safe_area['y'] - self.safe_area['h'] / 2),
+        #         self.safe_area['w'],
+        #         self.safe_area['h'],
+        #         facecolor='lightgreen',
+        #         edgecolor='green',
+        #         alpha=0.35,
+        #         zorder=1
+        #     )
+        #     ax.add_patch(safe_rect)
+        #     created.append(safe_rect)
 
         return created
