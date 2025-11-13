@@ -14,6 +14,7 @@ class HighwayController(LocalTrackingController):
         self._lane_patches = []
         self._traffic = []
         self._traffic_patches = []
+        self._backup_traj_lines = [] 
 
         self.asif_filter = BackupASIF(self.robot, self.robot_spec)
 
@@ -98,6 +99,24 @@ class HighwayController(LocalTrackingController):
                 except Exception:
                     pass
             self._lane_patches.clear()
+
+            # Clear previous backup trajectories
+            for line in self._backup_traj_lines:
+                try:
+                    line.remove()
+                except Exception:
+                    pass
+            self._backup_traj_lines.clear()
+
+            # Draw the stores backup trajectories
+            if hasattr(self, 'asif_filter') and self.asif_filter.visualize_backup:
+                trajs = self.asif_filter.get_backup_trajectories()
+                for phi in trajs:
+                    line, = self.ax.plot(
+                        phi[:, 0], phi[:, 1],
+                        color='orange', linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
+                    )
+                    self._backup_traj_lines.append(line)
 
             ego_x = float(self.robot.get_position()[0])
             lane_patches = self.highway_env.render_lanes(self.ax, ego_x=ego_x)

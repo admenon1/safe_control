@@ -913,12 +913,13 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
         'backup_type': 'lane_change',
         'lane_centers': env.lane_centers,
         'backup_lane_index': 2,  # Target rightmost lane
-        'radius': 0.5,
+        'radius': 1.0,
         'v_nominal': 2.0,   # constant forward speed (m/s)
+        'visualize_backup_set': True, # Set to false to disable backup set visualization
     }
 
     # Initial state [x, y, θ, v]
-    x0 = np.array([-2.0, env.lane_centers[0], 0.0, 0.0]).reshape(-1, 1)
+    x0 = np.array([-2.0, env.lane_centers[0], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
     
     # Create controller
     controller = HighwayController(
@@ -940,9 +941,9 @@ def highway_scenario_main(controller_type={'pos': 'backup_cbf'}, save_animation=
 
     controller.init_traffic([
         {
-            "x": 10.0,
+            "x": 15.0,
             "y": env.lane_centers[1],
-            "radius": 0.5,
+            "radius": 1.0,
             "vx": 0.5  # m/s speed for the slower car
         }
     ])

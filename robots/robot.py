@@ -142,7 +142,7 @@ class BaseRobot:
         self.U_att = np.array([0]).reshape(-1, 1)
 
         # Plot handles
-        self.vis_orient_len = 0.5
+        self.vis_orient_len = 1.5 # length of the orientation axis for visualization
         if self.robot_spec['model'] in ['KinematicBicycle2D', 'KinematicBicycle2D_C3BF', 'KinematicBicycle2D_DPCBF']:
             # Define robot dimensions
             self.robot_spec['body_length'] = self.robot_spec['front_ax_dist'] + self.robot_spec['rear_ax_dist']

@@ -20,7 +20,7 @@ class BackupASIF:
 
         # Horizon and integration step
         self.dt = self.robot.dt
-        self.backup_time = 1.5
+        self.backup_time = 10.0
         self.N = int(np.ceil(self.backup_time / self.dt))
 
         # Tightening parameters (non-robust)
@@ -34,7 +34,13 @@ class BackupASIF:
         self.target_lane_idx = self.robot_spec.get("backup_lane_index", 2)
         self.target_lane = lane_centers[self.target_lane_idx]
         self.target_speed = 0.0
-        self.lane_margin = 0.25
+        self.lane_margin = 0.5 # Set as 0 for now
+
+        # Visualization flag (Set to False to disable backup trajectory saving)
+        self.visualize_backup = self.robot_spec.get("visualize_backup_set", False)
+        self.backup_trajs = [] # For storing backup trajectories for visualization
+        self.save_every_N = 5  # Save every Nth trajectory, to avoid clutter
+        self.curr_step = 0
 
     # ------------------------------------------------------------------
     # Core dynamics helpers
@@ -70,16 +76,39 @@ class BackupASIF:
     # Backup controller (lane change)
     # ------------------------------------------------------------------
     def backup_control(self, x):
+        """
+        Pure PD that achieves ~T-second settling to the target lane (no time-varying reference).
+        Closed-loop lateral error behaves like a 2nd-order system with ζ≈0.7 and Ts≈T.
+        """
         x = x.reshape(-1)
         px, py, theta, v = x[:4]
 
-        # Lateral error
-        y_err = self.target_lane - py
-        k_lat = 1.5
-        omega = k_lat * y_err
+        # Desired settling time and damping
+        T = max(self.backup_time, 1e-3)
+        zeta = self.robot_spec.get("backup_zeta", 0.7)
 
-        # Decelerate to target speed
-        accel = 1.5 * (self.target_speed - v)
+        # Natural frequency from settling time Ts ≈ 4/(ζ ω_n)
+        omega_n = 4.0 / (zeta * T)
+
+        # Gains: k_y = ω_n^2, k_d + k_ψ = 2 ζ ω_n. Use k_d=0 => k_ψ = 2 ζ ω_n
+        k_y = omega_n**2
+        k_psi = 2.0 * zeta * omega_n
+
+        v_safe = max(abs(v), 0.5)
+        omega_max = self.robot_spec.get("omega_max_backup", 0.5)
+
+        # Errors (straight road, lane aligned with x-axis)
+        e_y = py - self.target_lane
+        e_psi = theta
+        # ė_y (used only if you add a derivative term) ≈ v sin(theta)
+        # e_y_dot = v * np.sin(theta)
+
+        # PD yaw-rate
+        omega = -k_psi * e_psi - (k_y / v_safe) * e_y
+        omega = np.clip(omega, -omega_max, omega_max)
+
+        # Keep longitudinal accel simple (no braking here)
+        accel = 0.0
         return np.array([[accel], [omega]])
 
     # ------------------------------------------------------------------
@@ -144,7 +173,7 @@ class BackupASIF:
         _, py, _, v = x[:4]
         lane_err = py - self.target_lane
         speed_err = v - self.target_speed
-        return -0.5 * (lane_err ** 2 + speed_err ** 2 - self.lane_margin ** 2)
+        return -0.5 * (lane_err ** 2 - self.lane_margin ** 2) # - 0.5 * speed_err ** 2
 
     def grad_h_backup(self, x):
         grad = np.zeros(self.nx)
@@ -171,6 +200,11 @@ class BackupASIF:
         x_curr = np.array(x_curr, dtype=float)
         u_des = np.array(u_des, dtype=float)
         phi, S_all = self.integrate_backup(x_curr)
+
+        # Store backup trajectories for visualization
+        if self.visualize_backup and self.curr_step % self.save_every_N == 0:
+            self.backup_trajs.append(phi.copy())
+        self.curr_step += 1
 
         f0 = self.f(x_curr)
         g0 = self.g(x_curr)
@@ -223,3 +257,11 @@ class BackupASIF:
         u_act = np.clip(u_act, -self.u_max, self.u_max)
         intervening = np.linalg.norm(u_act - u_des) > 1e-4
         return u_act, intervening
+    
+    def get_backup_trajectories(self):
+        """Return stored backup trajectories for plotting."""
+        return self.backup_trajs.copy() if self.visualize_backup else []
+    
+    def clear_trajectories(self):
+        """Clear stored backup trajectories. (call periodically to avoid memory bloat)"""
+        self.backup_trajs.clear()
