@@ -105,38 +105,38 @@ class DynamicUnicycle2D:
     #     omega = 0.0
     #     return np.array([accel, omega]).reshape(-1, 1)
 
-    def nominal_input_constant_speed(self, X, target_speed=2.0, k_a=1.0):
-        """
-        PD controller for constant speed cruise with heading alignment.
+    # def nominal_input_constant_speed(self, X, target_speed=2.0, k_a=1.0):
+    #     """
+    #     PD controller for constant speed cruise with heading alignment.
         
-        Args:
-            X: state [x, y, theta, v]
-            target_speed: desired forward velocity
-            k_a: proportional gain for acceleration
-            target_heading: desired heading angle (default 0.0 = horizontal/east)
-            k_omega: proportional gain for yaw rate
+    #     Args:
+    #         X: state [x, y, theta, v]
+    #         target_speed: desired forward velocity
+    #         k_a: proportional gain for acceleration
+    #         target_heading: desired heading angle (default 0.0 = horizontal/east)
+    #         k_omega: proportional gain for yaw rate
             
-        """
-        target_heading=0.0
-        k_omega=0.5
+    #     """
+    #     target_heading=0.0
+    #     k_omega=0.5
 
-        v = X[3, 0]
-        theta = X[2, 0]
+    #     v = X[3, 0]
+    #     theta = X[2, 0]
         
-        # Speed regulation (P control on velocity error)
-        accel = k_a * (target_speed - v)
+    #     # Speed regulation (P control on velocity error)
+    #     accel = k_a * (target_speed - v)
         
-        # Heading alignment (P control on angle error)
-        heading_error = target_heading - theta
-        # Normalize to [-pi, pi]
-        heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
-        omega = k_omega * heading_error
+    #     # Heading alignment (P control on angle error)
+    #     heading_error = target_heading - theta
+    #     # Normalize to [-pi, pi]
+    #     heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
+    #     omega = k_omega * heading_error
         
-        # Clip to limits
-        accel = np.clip(accel, -self.robot_spec['a_max'], self.robot_spec['a_max'])
-        omega = np.clip(omega, -self.robot_spec['w_max'], self.robot_spec['w_max'])
+    #     # Clip to limits
+    #     accel = np.clip(accel, -self.robot_spec['a_max'], self.robot_spec['a_max'])
+    #     omega = np.clip(omega, -self.robot_spec['w_max'], self.robot_spec['w_max'])
         
-        return np.array([[accel], [omega]])       
+    #     return np.array([[accel], [omega]])       
 
     def stop(self, X, k_a=1.0):
         # set desired velocity to zero

@@ -1,10 +1,10 @@
 import numpy as np
-import quadprog
+import cvxpy as cp
 
 
-class BackupASIF:
+class BackupCBFQP:
     """
-    Plain (non-robust) backup ASIF.
+    Plain (non-robust) backup CBF-QP.
     - Simulates the backup controller (lane 3 + brake) for a fixed horizon.
     - Propagates the sensitivity matrix for each time slice.
     - Enforces safety and terminal reachability constraints.
@@ -100,7 +100,7 @@ class BackupASIF:
         # Errors (straight road, lane aligned with x-axis)
         e_y = py - self.target_lane
         e_psi = theta
-        # ė_y (used only if you add a derivative term) ≈ v sin(theta)
+        # ė_y (used only if you add a derivative term) ≈ v sin(theta)
         # e_y_dot = v * np.sin(theta)
 
         # PD yaw-rate
@@ -209,10 +209,6 @@ class BackupASIF:
         f0 = self.f(x_curr)
         g0 = self.g(x_curr)
 
-        # QP variables
-        M = np.eye(self.nu)
-        q = u_des.copy()
-
         G_list = []
         h_list = []
 
@@ -248,9 +244,18 @@ class BackupASIF:
         G = np.array(G_list)
         h = np.array(h_list)
 
+        # Solve QP using cvxpy
+        u = cp.Variable(self.nu)
+        objective = cp.Minimize(cp.sum_squares(u - u_des))
+        constraints = [G @ u >= h]
+        prob = cp.Problem(objective, constraints)
+        
         try:
-            sol = quadprog.solve_qp(M, q, G.T, h, 0)
-            u_act = sol[0]
+            prob.solve(solver=cp.GUROBI)
+            if prob.status == 'optimal':
+                u_act = u.value
+            else:
+                u_act = u_des.copy()
         except Exception:
             u_act = u_des.copy()
 
