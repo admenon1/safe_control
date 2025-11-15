@@ -1,22 +1,21 @@
-"""
-Standalone Highway Scenario with Backup CBF
-============================================
-Consolidated implementation of highway driving with lane-change safety filter.
-Integrates environment rendering, traffic simulation, and backup ASIF control.
-
-Author: Consolidated from safe_control codebase
-Date: 2024
-"""
-
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from robots.robot import BaseRobot
 from backup_cbf.backup_cbf_qp import BackupCBFQP
 
+"""
+Created on November 15th, 2025
+@author: Aswin D Menon
+============================================
+Consolidated implementation of highway scenario using Backup CBF with double lane-change as the backup controller.
+Integrates environment rendering, traffic simulation, and backup.
+
+"""
+
 
 # ========================================================================
-# Highway Environment (embedded)
+# Highway Environment
 # ========================================================================
 class HighwayEnv:
     def __init__(self, width=60.0, height=12.0, num_lanes=3):
@@ -52,7 +51,7 @@ class HighwayEnv:
 
 
 # ========================================================================
-# Highway Controller (embedded)
+# Highway Controller
 # ========================================================================
 class HighwayController:
     def __init__(self, X0, robot_spec, highway_env, dt=0.05, 
@@ -76,7 +75,7 @@ class HighwayController:
         self.obs = np.empty((0, 7))
 
         # Backup CBF-QP filter
-        self.asif_filter = BackupCBFQP(self.robot, self.robot_spec)
+        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
 
         # Waypoints
         self.waypoints = None
@@ -195,8 +194,8 @@ class HighwayController:
         else:
             guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-        # Apply backup ASIF filter
-        u_safe, intervening = self.asif_filter.asif(
+        # Apply backup Backup CBF filter
+        u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(
             self.robot.X.flatten(), u_des, guard
         )
 
@@ -230,8 +229,8 @@ class HighwayController:
         self._backup_traj_lines.clear()
 
         # Draw stored backup trajectories
-        if hasattr(self.asif_filter, 'visualize_backup') and self.asif_filter.visualize_backup:
-            trajs = self.asif_filter.get_backup_trajectories()
+        if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
+            trajs = self.backup_cbf_filter.get_backup_trajectories()
             for phi in trajs:
                 line, = self.ax.plot(
                     phi[:, 0], phi[:, 1],

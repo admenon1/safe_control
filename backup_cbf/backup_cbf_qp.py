@@ -1,13 +1,21 @@
 import numpy as np
 import cvxpy as cp
 
+"""
+Created on November 15th, 2025
+@author: Aswin D Menon
+============================================
+Implementation of Backup CBF-QP with double lane-change as the backup controller.
+
+"""
+
 
 class BackupCBFQP:
     """
     Plain (non-robust) backup CBF-QP.
-    - Simulates the backup controller (lane 3 + brake) for a fixed horizon.
+    - Simulates the backup controller (lane 3) for a fixed horizon.
     - Propagates the sensitivity matrix for each time slice.
-    - Enforces safety and terminal reachability constraints.
+    - Enforces safety and terminal constraints. (N + 1 constraints)
     - Filters the nominal control with a 2×2 QP.
     """
 
@@ -172,8 +180,7 @@ class BackupCBFQP:
     def h_backup(self, x):
         _, py, _, v = x[:4]
         lane_err = py - self.target_lane
-        speed_err = v - self.target_speed
-        return -0.5 * (lane_err ** 2 - self.lane_margin ** 2) # - 0.5 * speed_err ** 2
+        return -0.5 * (lane_err ** 2 - self.lane_margin ** 2)
 
     def grad_h_backup(self, x):
         grad = np.zeros(self.nx)
@@ -188,9 +195,9 @@ class BackupCBFQP:
         return 10.0 * x
 
     # ------------------------------------------------------------------
-    # Main ASIF
+    # Main Backup CBF-QP
     # ------------------------------------------------------------------
-    def asif(self, x_curr, u_des, obs_vec):
+    def backup_cbf_qp(self, x_curr, u_des, obs_vec):
         """
         x_curr: current state (nx,)
         u_des : nominal control (nu,)
@@ -229,7 +236,7 @@ class BackupCBFQP:
             G_list.append(lhs)
             h_list.append(rhs)
 
-        # Terminal reachability
+        # Checking if the terminal state is in the backup set
         x_T = phi[-1]
         S_T = S_all[-1]
 
