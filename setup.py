@@ -6,7 +6,7 @@ setup(
     packages=find_packages(),
     install_requires=[
         'cvxpy',
-        'numpy==1.26.4',  # latest gurobipy version 11.0.2 is not compatible with numpy 2.0, but 11.0.3 will be
+        'numpy',  # latest gurobipy version 11.0.2 is not compatible with numpy 2.0, but 11.0.3 will be
         'matplotlib',
         'gurobipy',
         'shapely',
