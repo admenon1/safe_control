@@ -75,14 +75,14 @@ class HighwayController:
         self.obs = np.empty((0, 7))
 
         # Backup CBF-QP filter
-        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
+        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)  #### Shielding comes here
 
         # Waypoints
         self.waypoints = None
         self.goal_reached_flag = False
 
         # Overriding functions in robot.py
-        self.robot.nominal_input = self.nominal_input_constant_speed
+        self.robot.nominal_input = self.nominal_input_constant_speed  ## this will remain unchanged for mps
 
     def nominal_input_constant_speed(self, target_speed=2.0, **kwargs):
         """
@@ -183,8 +183,8 @@ class HighwayController:
 
         # Nominal control: constant speed, heading alignment
         u_des = self.robot.nominal_input(
-            target_speed=self.robot_spec.get('v_nominal', 2.0)
-        ).flatten()
+                target_speed=self.robot_spec.get('v_nominal', 2.0)
+            ).flatten()
 
         # Find nearest obstacle
         if self.obs.size > 0:
@@ -195,7 +195,7 @@ class HighwayController:
             guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
         # Apply backup Backup CBF filter
-        u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(
+        u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(              #### this is where shielding is called
             self.robot.X.flatten(), u_des, guard
         )
 
