@@ -8,14 +8,165 @@ from backup_cbf.backup_cbf_qp import BackupCBFQP
 Created on November 15th, 2025
 @author: Aswin D Menon
 ============================================
-Consolidated implementation of highway scenario using Backup CBF with double lane-change as the backup controller.
-Integrates environment rendering, traffic simulation, and backup.
-
+Highway scenario using Backup CBF with lane-change backup controller.
+All environment-specific parameters are defined here and given to the BackupCBFQP framework.
 """
 
 
 # ========================================================================
-# Highway Environment
+# Highway Environment Parameters and Functions
+# ========================================================================
+class HighwayEnvironmentConfig:
+    """
+    Encapsulates all highway-scenario-specific parameters and CBF definitions.
+    """
+    def __init__(self, lane_centers, target_lane_idx=2):
+        # Lane parameters
+        self.lane_centers = lane_centers
+        self.target_lane_idx = target_lane_idx
+        self.target_lane = lane_centers[target_lane_idx]
+        self.target_speed = 0.0
+        self.lane_margin = 0.5
+
+        # Backup controller parameters
+        self.backup_time = 10.0
+        self.backup_zeta = 0.7
+        self.omega_max_backup = 0.5
+
+        # CBF class-K function parameters
+        self.alpha_linear_coeff = 15.0
+        self.alpha_b_coeff = 10.0
+
+
+    # ------------------------------------------------------------------
+    # Backup Controller (Lane Change)
+    # ------------------------------------------------------------------
+    def backup_control(self, x, robot_spec):
+        """
+        PD controller for lane change to target lane.
+        Achieves ~T-second settling with ζ≈0.7.
+        
+        Args:
+            x: state [px, py, theta, v]
+            robot_spec: robot specification dict
+        
+        Returns:
+            u_b: backup control [[accel], [omega]]
+        """
+        x = x.reshape(-1)
+        px, py, theta, v = x[:4]
+
+        # Desired settling time and damping
+        T = max(self.backup_time, 1e-3)
+        zeta = self.backup_zeta
+
+        # Natural frequency from settling time Ts ≈ 4/(ζ ω_n)
+        omega_n = 4.0 / (zeta * T)
+
+        # PD gains
+        k_y = omega_n**2
+        k_psi = 2.0 * zeta * omega_n
+
+        v_safe = max(abs(v), 0.5)
+        omega_max = self.omega_max_backup
+
+        # Errors (straight road, lane aligned with x-axis)
+        e_y = py - self.target_lane
+        e_psi = theta
+
+        # PD yaw-rate control
+        omega = -k_psi * e_psi - (k_y / v_safe) * e_y
+        omega = np.clip(omega, -omega_max, omega_max)
+
+        # No longitudinal acceleration during lane change
+        accel = 0.0
+        return np.array([[accel], [omega]])
+
+    # ------------------------------------------------------------------
+    # Safety CBF (Collision Avoidance)
+    # ------------------------------------------------------------------
+    def h_safety(self, x, obs, robot_radius):
+        """
+        Safety CBF: Distance to obstacle minus combined radius.
+        h > 0 means safe, h = 0 is boundary, h < 0 is collision.
+        
+        Args:
+            x: state [px, py, theta, v]
+            obs: obstacle [ox, oy, radius, vx, vy, ...]
+            robot_radius: ego robot radius
+        
+        Returns:
+            h: CBF value (positive = safe)
+        """
+        px, py = x[:2]
+        ox, oy, r = obs[:3]
+        combined = r + robot_radius
+        return (px - ox) ** 2 + (py - oy) ** 2 - combined ** 2
+
+    def grad_h_safety(self, x, obs):
+        """
+        Gradient of safety CBF with respect to state.
+        
+        Returns:
+            grad_h: gradient vector (nx,)
+        """
+        px, py = x[:2]
+        ox, oy = obs[:2]
+        grad = np.zeros(x.size)
+        grad[0] = 2.0 * (px - ox)
+        grad[1] = 2.0 * (py - oy)
+        return grad
+
+    # ------------------------------------------------------------------
+    # Terminal CBF (Lane Reachability)
+    # ------------------------------------------------------------------
+    def h_backup(self, x):
+        """
+        Terminal CBF: Vehicle is within lane margin of target lane.
+        
+        Returns:
+            h_b: CBF value (positive = in target lane)
+        """
+        _, py, _, v = x[:4]
+        lane_err = py - self.target_lane
+        return -0.5 * (lane_err ** 2 - self.lane_margin ** 2)
+
+    def grad_h_backup(self, x):
+        """
+        Gradient of terminal CBF with respect to state.
+        
+        Returns:
+            grad_h_b: gradient vector (nx,)
+        """
+        grad = np.zeros(x.size)
+        grad[1] = -(x[1] - self.target_lane)
+        grad[3] = -(x[3] - self.target_speed)
+        return grad
+
+    # ------------------------------------------------------------------
+    # Class-K Functions (CBF Enforcement)
+    # ------------------------------------------------------------------
+    def alpha(self, h):
+        """
+        Class-K function for safety CBF.
+        Controls aggressiveness of collision avoidance.
+        
+        Form: α(h) = c₁·h
+        """
+        return self.alpha_linear_coeff * h
+
+    def alpha_b(self, h_b):
+        """
+        Class-K function for terminal CBF.
+        Controls aggressiveness of lane-reaching.
+        
+        Form: α_b(h_b) = c·h_b
+        """
+        return self.alpha_b_coeff * h_b
+
+
+# ========================================================================
+# Highway Environment (Visualization)
 # ========================================================================
 class HighwayEnv:
     def __init__(self, width=60.0, height=12.0, num_lanes=3):
@@ -54,9 +205,10 @@ class HighwayEnv:
 # Highway Controller
 # ========================================================================
 class HighwayController:
-    def __init__(self, X0, robot_spec, highway_env, dt=0.05, 
+    def __init__(self, X0, robot_spec, highway_env, highway_config, dt=0.05, 
                  show_animation=True, save_animation=False, ax=None, fig=None):
         self.highway_env = highway_env
+        self.highway_config = highway_config
         self.dt = dt
         self.show_animation = show_animation
         self.save_animation = save_animation
@@ -74,43 +226,63 @@ class HighwayController:
         self._backup_traj_lines = []
         self.obs = np.empty((0, 7))
 
-        # Backup CBF-QP filter
+        # Backup CBF-QP filter (generic framework)
         self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
+        
+        # Inject highway-specific parameters and functions
+        self._configure_backup_cbf()
 
         # Waypoints
         self.waypoints = None
         self.goal_reached_flag = False
 
-        # Overriding functions in robot.py
+        # Override robot's nominal controller
         self.robot.nominal_input = self.nominal_input_constant_speed
+
+    def _configure_backup_cbf(self):
+        """
+        Configure the BackupCBFQP with highway-specific callbacks.
+        This is where environment-specific logic is given.
+        """
+        # Create lambda wrappers to bind robot_spec
+        backup_control_fn = lambda x: self.highway_config.backup_control(x, self.robot_spec)
+        h_safety_fn = self.highway_config.h_safety
+        grad_h_safety_fn = self.highway_config.grad_h_safety
+        h_backup_fn = self.highway_config.h_backup
+        grad_h_backup_fn = self.highway_config.grad_h_backup
+        alpha_fn = self.highway_config.alpha
+        alpha_b_fn = self.highway_config.alpha_b
+
+        # Inject into BackupCBFQP
+        self.backup_cbf_filter.set_environment_callbacks(
+            backup_time=self.highway_config.backup_time,
+            backup_control_fn=backup_control_fn,
+            h_safety_fn=h_safety_fn,
+            grad_h_safety_fn=grad_h_safety_fn,
+            h_backup_fn=h_backup_fn,
+            grad_h_backup_fn=grad_h_backup_fn,
+            alpha_fn=alpha_fn,
+            alpha_b_fn=alpha_b_fn
+        )
 
     def nominal_input_constant_speed(self, target_speed=2.0, **kwargs):
         """
-        Custom nominal controller for highway driving - overrides robot.nominal_input.
-        Implements constant speed cruise with heading alignment.
-        
-        Args:
-            target_speed: desired forward velocity
-            **kwargs: catches any additional arguments (like 'goal' from base class)
-        
-        Returns:
-            np.array([[accel], [omega]]): control input
+        Nominal controller: Constant speed cruise with heading alignment.
         """
         X = self.robot.X
         v = X[3, 0]
         theta = X[2, 0]
         
         # Controller gains
-        k_a = 1.0          # Proportional gain for acceleration
-        k_omega = 0.5      # Proportional gain for yaw rate
-        target_heading = 0.0  # Drive straight (horizontal)
-        
-        # Speed regulation (P control on velocity error)
+        k_a = 1.0
+        k_omega = 0.5
+        target_heading = 0.0  # Drive straight
+
+        # Speed regulation
         accel = k_a * (target_speed - v)
         
-        # Heading alignment (P control on angle error)
+        # Heading alignment
         heading_error = target_heading - theta
-        # Normalize to [-pi, pi]
         heading_error = np.arctan2(np.sin(heading_error), np.cos(heading_error))
         omega = k_omega * heading_error
         
@@ -118,7 +290,7 @@ class HighwayController:
         accel = np.clip(accel, -self.robot_spec['a_max'], self.robot_spec['a_max'])
         omega = np.clip(omega, -self.robot_spec['w_max'], self.robot_spec['w_max'])
         
-        return np.array([[accel], [omega]]) 
+        return np.array([[accel], [omega]])
 
     def init_traffic(self, traffic_spec):
         """Initialize traffic cars with positions and velocities."""
@@ -181,7 +353,7 @@ class HighwayController:
         """Execute one control loop iteration."""
         self._advance_traffic()
 
-        # Nominal control: constant speed, heading alignment
+        # Nominal control
         u_des = self.robot.nominal_input(
             target_speed=self.robot_spec.get('v_nominal', 2.0)
         ).flatten()
@@ -194,7 +366,7 @@ class HighwayController:
         else:
             guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-        # Apply backup Backup CBF filter
+        # Apply backup CBF filter
         u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(
             self.robot.X.flatten(), u_des, guard
         )
@@ -208,11 +380,11 @@ class HighwayController:
         return 0 if not intervening else 1
 
     def draw_plot(self, pause=0.01):
-        """Update visualization (lanes, backup trajectories, etc.)."""
+        """Update visualization."""
         if not self.show_animation:
             return
 
-        # Clear previous lane patches
+        # Clear previous patches
         for patch in self._lane_patches:
             try:
                 patch.remove()
@@ -220,7 +392,6 @@ class HighwayController:
                 pass
         self._lane_patches.clear()
 
-        # Clear previous backup trajectory lines
         for line in self._backup_traj_lines:
             try:
                 line.remove()
@@ -228,7 +399,7 @@ class HighwayController:
                 pass
         self._backup_traj_lines.clear()
 
-        # Draw stored backup trajectories
+        # Draw backup trajectories
         if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
             trajs = self.backup_cbf_filter.get_backup_trajectories()
             for phi in trajs:
@@ -255,8 +426,14 @@ class HighwayController:
 # ========================================================================
 def highway_scenario_main(save_animation=False):
     """Run the highway scenario with backup CBF control."""
-    # Create highway environment (3 lanes)
+    # Create highway environment
     env = HighwayEnv(width=60.0, height=12.0, num_lanes=3)
+    
+    # Create highway-specific configuration
+    highway_config = HighwayEnvironmentConfig(
+        lane_centers=env.lane_centers,
+        target_lane_idx=2  # Target rightmost lane
+    )
 
     # Setup plotting
     plt.ion()
@@ -271,16 +448,12 @@ def highway_scenario_main(save_animation=False):
         'model': 'DynamicUnicycle2D',
         'w_max': 0.5,
         'a_max': 0.5,
-        'backup_trigger_dist': 6.0,
-        'backup_type': 'lane_change',
-        'lane_centers': env.lane_centers,
-        'backup_lane_index': 2,  # Target rightmost lane (lane 3)
         'radius': 1.0,
         'v_nominal': 2.0,
         'visualize_backup_set': True,
     }
 
-    # Initial state [x, y, θ, v] - start in lane 1 at nominal speed
+    # Initial state [x, y, θ, v]
     x0 = np.array([-2.0, env.lane_centers[0], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
 
     # Create controller
@@ -288,6 +461,7 @@ def highway_scenario_main(save_animation=False):
         X0=x0,
         robot_spec=robot_spec,
         highway_env=env,
+        highway_config=highway_config,  # Pass environment config
         dt=0.05,
         show_animation=True,
         save_animation=save_animation,
@@ -295,28 +469,27 @@ def highway_scenario_main(save_animation=False):
         fig=fig
     )
 
-    # Set waypoint: drive straight in lane 1
+    # Set waypoint
     waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
 
-    # Add traffic obstacle in lane 2
+    # Add traffic obstacle
     controller.init_traffic([
         {
             "x": 15.0,
             "y": env.lane_centers[1],
             "radius": 1.0,
-            "vx": 0.5  # slower-moving obstacle
+            "vx": 0.5
         }
     ])
 
-    # Run simulation loop
+    # Run simulation
     print("Starting highway scenario simulation...")
     try:
         while not controller.has_reached_goal():
             controller.control_step()
             controller.draw_plot()
 
-            # Stop if ego reaches x = 55
             if controller.robot.X[0, 0] >= 55.0:
                 break
 
