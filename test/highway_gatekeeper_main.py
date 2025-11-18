@@ -91,6 +91,9 @@ class HighwayGatekeeperController:
             event_offset=event_offset
         )
         
+        # Enable backup trajectory visualization
+        self.gatekeeper.visualize_backup = robot_spec.get('visualize_backup_set', True)
+        
         # Set nominal and backup controllers
         self.target_lane_idx = robot_spec.get('target_lane_index', 2)
         self.target_lane = highway_env.lane_centers[self.target_lane_idx]
@@ -304,6 +307,16 @@ class HighwayGatekeeperController:
                 pass
         self._backup_traj_lines.clear()
 
+        # Draw backup trajectories from Gatekeeper
+        if hasattr(self.gatekeeper, 'visualize_backup') and self.gatekeeper.visualize_backup:
+            trajs = self.gatekeeper.get_backup_trajectories()
+            for backup_traj in trajs:
+                line, = self.ax.plot(
+                    backup_traj[:, 0], backup_traj[:, 1],
+                    color='orange', linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
+                )
+                self._backup_traj_lines.append(line)
+
         # Draw committed trajectory from Gatekeeper
         if hasattr(self.gatekeeper, 'committed_x_traj') and self.gatekeeper.committed_x_traj is not None:
             traj = self.gatekeeper.committed_x_traj
@@ -368,6 +381,7 @@ def highway_gatekeeper_main(save_animation=False):
         'v_nominal': 2.0,
         'target_lane_index': 2,  # Target rightmost lane for backup
         'robot_id': 0,
+        'visualize_backup_set': True,  # Enable backup trajectory visualization
     }
 
     # Initial state [x, y, θ, v] - start in lane 1 at nominal speed
@@ -380,8 +394,8 @@ def highway_gatekeeper_main(save_animation=False):
         highway_env=env,
         dt=0.05,
         nominal_horizon=2.0,
-        backup_horizon=10.0,
-        event_offset=1.0,
+        backup_horizon=4.0,  # Reduced from 10.0 - shorter backup maneuver
+        event_offset=0.5,     # Reduced from 1.0 - replan more frequently
         show_animation=True,
         save_animation=save_animation,
         ax=ax,
