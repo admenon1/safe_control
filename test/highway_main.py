@@ -40,7 +40,7 @@ class HighwayEnvironmentConfig:
         self.lane_margin = 0.5
 
         # Backup controller parameters
-        self.backup_time = 4.0  # Match backup horizon for responsive lane changes
+        self.backup_time = 4 # Match backup horizon for responsive lane changes
         self.backup_zeta = 0.7
         self.omega_max_backup = 0.5
 
@@ -68,7 +68,7 @@ class HighwayEnvironmentConfig:
         px, py, theta, v = x[:4]
 
         # Desired settling time and damping
-        T = max(self.backup_time, 1e-3)
+        T = max(self.backup_time, 1e-3) ### 10 does not work for gatekeeper. 4 does not work for backup-CBF
         zeta = self.backup_zeta
 
         # Natural frequency from settling time Ts ≈ 4/(ζ ω_n)
@@ -578,12 +578,12 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
         backup_horizon = 10.0  # Backup CBF horizon
         event_offset = 0.5     # Not used by backup_cbf
     elif controller_type == 'gatekeeper':
-        nominal_horizon = 2.0  # Nominal trajectory duration
-        backup_horizon = 7.0   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 6  # Nominal trajectory duration
+        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     elif controller_type == 'shielding':
-        nominal_horizon = 2.0  # Maximum nominal trajectory duration to search
-        backup_horizon = 4.0   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 6  # Maximum nominal trajectory duration to search
+        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     else:
         nominal_horizon = 2.0
@@ -671,4 +671,4 @@ if __name__ == "__main__":
             sys.exit(1)
     
     print(f"Running highway scenario with controller: {controller_type}")
-    highway_scenario_main(controller_type=controller_type, save_animation=False)
+    highway_scenario_main(controller_type=controller_type, save_animation=True)

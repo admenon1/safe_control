@@ -215,9 +215,9 @@ class Shielding:
             for i in range(int(self.nominal_horizon // self.horizon_discount) + 1):
                 discounted_nominal_horizon = i * self.horizon_discount
                 
-                # Cap at maximum nominal horizon
-                if discounted_nominal_horizon > self.nominal_horizon:
-                    discounted_nominal_horizon = self.nominal_horizon
+                # # Cap at maximum nominal horizon
+                # if discounted_nominal_horizon > self.nominal_horizon:
+                #     discounted_nominal_horizon = self.nominal_horizon
                 
                 # Ensure minimum trajectory length
                 if discounted_nominal_horizon < self.dt:
@@ -236,8 +236,8 @@ class Shielding:
             
             # Commit using last_safe_i
             discounted_nominal_horizon = last_safe_i * self.horizon_discount
-            if discounted_nominal_horizon > self.nominal_horizon:
-                discounted_nominal_horizon = self.nominal_horizon
+            # if discounted_nominal_horizon > self.nominal_horizon:
+            #     discounted_nominal_horizon = self.nominal_horizon
             if discounted_nominal_horizon < self.dt:
                 discounted_nominal_horizon = self.dt
                 
