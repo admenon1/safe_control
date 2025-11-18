@@ -8,7 +8,7 @@ import os
 gatekeeper_path = os.path.join(os.path.dirname(__file__), '../../gatekeeper')
 sys.path.insert(0, gatekeeper_path)
 
-from shielding import Gatekeeper  # Using shielding implementation
+from shielding import Shielding  # Using shielding implementation
 from robots.robot import BaseRobot
 
 """
@@ -82,8 +82,8 @@ class HighwayShieldingController:
         self._backup_traj_lines = []
         self.obs = np.empty((0, 7))
 
-        # Shielding controller (using Gatekeeper class from shielding.py)
-        self.shielding = Gatekeeper(
+        # Shielding controller (using Shielding class from shielding.py)
+        self.shielding = Shielding(
             self.robot, 
             dt=dt, 
             nominal_horizon=nominal_horizon, 

@@ -1,15 +1,26 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import sys
+import os
 from robots.robot import BaseRobot
 from backup_cbf.backup_cbf_qp import BackupCBFQP
+from gatekeeper.gatekeeper import Gatekeeper
+from gatekeeper.shielding import Shielding
 
 """
 Created on November 15th, 2025
 @author: Aswin D Menon
+Updated on November 18th, 2025
 ============================================
-Highway scenario using Backup CBF with lane-change backup controller.
-All environment-specific parameters are defined here and given to the BackupCBFQP framework.
+Modular highway scenario supporting multiple safety controllers:
+- backup_cbf 
+- gatekeeper
+- shielding
+
+Usage:
+    python highway_main.py [controller_type]
+    controller_type: 'backup_cbf' (default), 'gatekeeper', or 'shielding'
 """
 
 
@@ -29,7 +40,7 @@ class HighwayEnvironmentConfig:
         self.lane_margin = 0.5
 
         # Backup controller parameters
-        self.backup_time = 10.0
+        self.backup_time = 4.0  # Match backup horizon for responsive lane changes
         self.backup_zeta = 0.7
         self.omega_max_backup = 0.5
 
@@ -206,10 +217,12 @@ class HighwayEnv:
 # ========================================================================
 class HighwayController:
     def __init__(self, X0, robot_spec, highway_env, highway_config, dt=0.05, 
+                 controller_type='backup_cbf', nominal_horizon=2.0, backup_horizon=4.0, event_offset=0.5,
                  show_animation=True, save_animation=False, ax=None, fig=None):
         self.highway_env = highway_env
         self.highway_config = highway_config
         self.dt = dt
+        self.controller_type = controller_type
         self.show_animation = show_animation
         self.save_animation = save_animation
         self.ax = ax or plt.axes()
@@ -224,22 +237,46 @@ class HighwayController:
         self._traffic_patches = []
         self._lane_patches = []
         self._backup_traj_lines = []
+        self._nominal_traj_lines = []
         self.obs = np.empty((0, 7))
 
-        # Backup CBF-QP filter
-        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)  #### Shielding comes here
-        # Backup CBF-QP filter (generic framework)
-        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
+        # Safety controller (selected based on controller_type)
+        self.safety_controller = None
+        self.control_ref = None  # For gatekeeper/shielding
         
-        # Inject highway-specific parameters and functions
-        self._configure_backup_cbf()
+        if controller_type == 'backup_cbf':
+            self.safety_controller = BackupCBFQP(self.robot, self.robot_spec)
+            self._configure_backup_cbf()
+        elif controller_type in ['gatekeeper', 'shielding']:
+            if controller_type == 'shielding':
+                self.safety_controller = Shielding(
+                    self.robot, dt=dt, 
+                    nominal_horizon=nominal_horizon,
+                    backup_horizon=backup_horizon,
+                    event_offset=event_offset
+                )
+            else:  # gatekeeper
+                print("Initializing Gatekeeper controller.")
+                self.safety_controller = Gatekeeper(
+                    self.robot, dt=dt,
+                    nominal_horizon=nominal_horizon,
+                    backup_horizon=backup_horizon,
+                    event_offset=event_offset
+                )
+            
+            # Enable visualization
+            self.safety_controller.visualize_backup = robot_spec.get('visualize_backup_set', True)
+            
+            # Set controllers
+            self.safety_controller._set_nominal_controller(self.nominal_controller_wrapper)
+            self.safety_controller._set_backup_controller(self.backup_controller_wrapper)
+        else:
+            raise ValueError(f"Unknown controller_type: {controller_type}. Choose 'backup_cbf', 'gatekeeper', or 'shielding'.")
 
         # Waypoints
         self.waypoints = None
         self.goal_reached_flag = False
 
-        # Overriding functions in robot.py
-        self.robot.nominal_input = self.nominal_input_constant_speed  ## this will remain unchanged for mps
         # Override robot's nominal controller
         self.robot.nominal_input = self.nominal_input_constant_speed
 
@@ -258,7 +295,7 @@ class HighwayController:
         alpha_b_fn = self.highway_config.alpha_b
 
         # Inject into BackupCBFQP
-        self.backup_cbf_filter.set_environment_callbacks(
+        self.safety_controller.set_environment_callbacks(
             backup_time=self.highway_config.backup_time,
             backup_control_fn=backup_control_fn,
             h_safety_fn=h_safety_fn,
@@ -268,6 +305,14 @@ class HighwayController:
             alpha_fn=alpha_fn,
             alpha_b_fn=alpha_b_fn
         )
+
+    def nominal_controller_wrapper(self, state, goal):
+        """Wrapper for Gatekeeper/Shielding to call nominal controller."""
+        return self.nominal_input_constant_speed(target_speed=self.robot_spec.get('v_nominal', 2.0))
+
+    def backup_controller_wrapper(self, state):
+        """Wrapper for Gatekeeper/Shielding to call backup controller."""
+        return self.highway_config.backup_control(state, self.robot_spec)
 
     def nominal_input_constant_speed(self, target_speed=2.0, **kwargs):
         """
@@ -344,6 +389,15 @@ class HighwayController:
     def set_waypoints(self, waypoints):
         """Set goal waypoints for the ego vehicle."""
         self.waypoints = np.array(waypoints, dtype=float)
+        
+        # Initialize control reference for gatekeeper/shielding
+        if self.controller_type in ['gatekeeper', 'shielding']:
+            goal = self.waypoints[-1] if self.waypoints is not None else np.array([55.0, self.highway_env.lane_centers[0]])
+            self.control_ref = {
+                'goal': goal.reshape(-1, 1),
+                'state_machine': 'track',
+                'u_ref': np.zeros((2, 1))
+            }
 
     def has_reached_goal(self):
         """Check if ego vehicle reached the final waypoint."""
@@ -357,31 +411,45 @@ class HighwayController:
         """Execute one control loop iteration."""
         self._advance_traffic()
 
-        # Nominal control
-        u_des = self.robot.nominal_input(
-                target_speed=self.robot_spec.get('v_nominal', 2.0)
-            ).flatten()
+        if self.controller_type == 'backup_cbf':
+            # Backup CBF-QP mode
+            u_des = self.robot.nominal_input(
+                    target_speed=self.robot_spec.get('v_nominal', 2.0)
+                ).flatten()
 
-        # Find nearest obstacle
-        if self.obs.size > 0:
-            ego_pos = self.robot.get_position()
-            dists = np.linalg.norm(self.obs[:, :2] - ego_pos, axis=1)
-            guard = self.obs[np.argmin(dists)]
-        else:
-            guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            # Find nearest obstacle
+            if self.obs.size > 0:
+                ego_pos = self.robot.get_position()
+                dists = np.linalg.norm(self.obs[:, :2] - ego_pos, axis=1)
+                guard = self.obs[np.argmin(dists)]
+            else:
+                guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-        # Apply backup Backup CBF filter
-        u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(              #### this is where shielding is called, u_safe comes from the gatekeeper code. 
-            self.robot.X.flatten(), u_des, guard
-        )
-
-        # Step robot dynamics
-        self.robot.step(u_safe.reshape(-1, 1))
+            # Apply backup CBF filter
+            u_safe, intervening = self.safety_controller.backup_cbf_qp(
+                self.robot.X.flatten(), u_des, guard
+            )
+            
+            # Step robot dynamics
+            self.robot.step(u_safe.reshape(-1, 1))
+            return_val = 0 if not intervening else 1
+            
+        elif self.controller_type in ['gatekeeper', 'shielding']:
+            # Gatekeeper/Shielding mode
+            u_safe = self.safety_controller.solve_control_problem(
+                self.robot.X,
+                self.control_ref,
+                self.obs
+            )
+            
+            # Step robot dynamics
+            self.robot.step(u_safe.reshape(-1, 1))
+            return_val = 0
 
         if self.show_animation:
             self.robot.render_plot()
 
-        return 0 if not intervening else 1
+        return return_val
 
     def draw_plot(self, pause=0.01):
         """Update visualization."""
@@ -402,16 +470,53 @@ class HighwayController:
             except Exception:
                 pass
         self._backup_traj_lines.clear()
+        
+        for line in self._nominal_traj_lines:
+            try:
+                line.remove()
+            except Exception:
+                pass
+        self._nominal_traj_lines.clear()
 
-        # Draw backup trajectories
-        if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
-            trajs = self.backup_cbf_filter.get_backup_trajectories()
-            for phi in trajs:
+        # Draw backup trajectories (common for all controllers)
+        if hasattr(self.safety_controller, 'visualize_backup') and self.safety_controller.visualize_backup:
+            trajs = self.safety_controller.get_backup_trajectories()
+            
+            # Different colors for different controllers
+            color = 'orange' if self.controller_type in ['backup_cbf', 'gatekeeper'] else 'red'
+            
+            for traj in trajs:
                 line, = self.ax.plot(
-                    phi[:, 0], phi[:, 1],
-                    color='orange', linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
+                    traj[:, 0], traj[:, 1],
+                    color=color, linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
                 )
                 self._backup_traj_lines.append(line)
+
+        # Draw committed trajectory for gatekeeper/shielding
+        if self.controller_type in ['gatekeeper', 'shielding']:
+            if hasattr(self.safety_controller, 'committed_x_traj') and self.safety_controller.committed_x_traj is not None:
+                traj = self.safety_controller.committed_x_traj
+                
+                # Separate nominal and backup portions
+                if hasattr(self.safety_controller, 'committed_horizon'):
+                    nominal_len = int(self.safety_controller.committed_horizon / self.dt)
+                    
+                    # Draw nominal trajectory (green)
+                    if nominal_len > 0 and nominal_len <= len(traj):
+                        line, = self.ax.plot(
+                            traj[:nominal_len, 0], traj[:nominal_len, 1],
+                            color='green', linestyle='-', linewidth=2.0, alpha=0.8, zorder=2
+                        )
+                        self._nominal_traj_lines.append(line)
+                    
+                    # Draw backup trajectory (orange or red)
+                    color = 'orange' if self.controller_type == 'gatekeeper' else 'red'
+                    if nominal_len < len(traj):
+                        line, = self.ax.plot(
+                            traj[nominal_len:, 0], traj[nominal_len:, 1],
+                            color=color, linestyle='--', linewidth=2.0, alpha=0.8, zorder=2
+                        )
+                        self._backup_traj_lines.append(line)
 
         # Render lanes
         ego_x = float(self.robot.get_position()[0])
@@ -428,8 +533,14 @@ class HighwayController:
 # ========================================================================
 # Main Simulation Entry Point
 # ========================================================================
-def highway_scenario_main(save_animation=False):
-    """Run the highway scenario with backup CBF control."""
+def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
+    """
+    Run the highway scenario with specified safety controller.
+    
+    Args:
+        controller_type: 'backup_cbf', 'gatekeeper', or 'shielding'
+        save_animation: whether to save animation frames
+    """
     # Create highway environment
     env = HighwayEnv(width=60.0, height=12.0, num_lanes=3)
     
@@ -446,6 +557,7 @@ def highway_scenario_main(save_animation=False):
     ax.set_aspect('equal')
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
+    ax.set_title(f"Highway Scenario with {controller_type.upper()} Controller")
 
     # Robot specification
     robot_spec = {
@@ -460,12 +572,34 @@ def highway_scenario_main(save_animation=False):
     # Initial state [x, y, θ, v]
     x0 = np.array([-2.0, env.lane_centers[0], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
 
+    # Controller-specific parameters
+    if controller_type == 'backup_cbf':
+        nominal_horizon = 2.0  # Not used by backup_cbf
+        backup_horizon = 10.0  # Backup CBF horizon
+        event_offset = 0.5     # Not used by backup_cbf
+    elif controller_type == 'gatekeeper':
+        nominal_horizon = 2.0  # Nominal trajectory duration
+        backup_horizon = 7.0   # Backup trajectory duration (from end of nominal)
+        event_offset = 0.5     # Replanning frequency
+    elif controller_type == 'shielding':
+        nominal_horizon = 2.0  # Maximum nominal trajectory duration to search
+        backup_horizon = 4.0   # Backup trajectory duration (from end of nominal)
+        event_offset = 0.5     # Replanning frequency
+    else:
+        nominal_horizon = 2.0
+        backup_horizon = 4.0
+        event_offset = 0.5
+
     # Create controller
     controller = HighwayController(
         X0=x0,
         robot_spec=robot_spec,
         highway_env=env,
-        highway_config=highway_config,  # Pass environment config
+        highway_config=highway_config,
+        controller_type=controller_type,
+        nominal_horizon=nominal_horizon,
+        backup_horizon=backup_horizon,
+        event_offset=event_offset,
         dt=0.05,
         show_animation=True,
         save_animation=save_animation,
@@ -477,33 +611,64 @@ def highway_scenario_main(save_animation=False):
     waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
 
-    # Add traffic obstacle
+    # Add traffic obstacles
     controller.init_traffic([
         {
             "x": 15.0,
             "y": env.lane_centers[1],
             "radius": 1.0,
-            "vx": 0.5
+            "vx": 0.5  # slower-moving obstacle in lane 2
         }
+        # {
+        #     "x": 10.0,
+        #     "y": env.lane_centers[0],
+        #     "radius": 1.0,
+        #     "vx": 1.0  # slower obstacle in same lane as ego (lane 1)
+        # }
     ])
 
     # Run simulation
-    print("Starting highway scenario simulation...")
+    print(f"Starting highway scenario simulation with {controller_type.upper()}...")
+    print(f"Nominal horizon: {nominal_horizon}s")
+    print(f"Backup horizon: {backup_horizon}s")
+    if controller_type in ['gatekeeper', 'shielding']:
+        print(f"Event offset: {event_offset}s")
+    
     try:
+        step_count = 0
         while not controller.has_reached_goal():
             controller.control_step()
             controller.draw_plot()
+            step_count += 1
 
             if controller.robot.X[0, 0] >= 55.0:
+                break
+
+            # Safety limit
+            if step_count > 5000:
+                print("Maximum simulation steps reached.")
                 break
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user.")
     finally:
         print("Simulation complete.")
+        print(f"Total steps: {step_count}")
         plt.ioff()
         plt.show()
 
 
 if __name__ == "__main__":
-    highway_scenario_main(save_animation=False)
+    import sys
+    
+    # Parse command line argument for controller type
+    controller_type = 'backup_cbf'  # default
+    if len(sys.argv) > 1:
+        controller_type = sys.argv[1].lower()
+        if controller_type not in ['backup_cbf', 'gatekeeper', 'shielding']:
+            print(f"Unknown controller type: {controller_type}")
+            print("Valid options: 'backup_cbf', 'gatekeeper', 'shielding'")
+            sys.exit(1)
+    
+    print(f"Running highway scenario with controller: {controller_type}")
+    highway_scenario_main(controller_type=controller_type, save_animation=False)

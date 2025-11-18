@@ -4,11 +4,7 @@ import matplotlib.patches as patches
 import sys
 import os
 
-# Add gatekeeper directory to path
-gatekeeper_path = os.path.join(os.path.dirname(__file__), '../../gatekeeper')
-sys.path.insert(0, gatekeeper_path)
-
-from gatekeeper import Gatekeeper
+from gatekeeper.gatekeeper import Gatekeeper
 from robots.robot import BaseRobot
 
 """
@@ -394,7 +390,7 @@ def highway_gatekeeper_main(save_animation=False):
         highway_env=env,
         dt=0.05,
         nominal_horizon=2.0,
-        backup_horizon=4.0,  # Reduced from 10.0 - shorter backup maneuver
+        backup_horizon=7.0,  # Reduced from 10.0 - shorter backup maneuver
         event_offset=0.5,     # Reduced from 1.0 - replan more frequently
         show_animation=True,
         save_animation=save_animation,
@@ -406,13 +402,13 @@ def highway_gatekeeper_main(save_animation=False):
     waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
 
-    # Add traffic obstacle in lane 2
+    # Add traffic obstacles
     controller.init_traffic([
         {
             "x": 15.0,
             "y": env.lane_centers[1],
             "radius": 1.0,
-            "vx": 0.5  # slower-moving obstacle
+            "vx": 0.5  # slower-moving obstacle in lane 2
         }
     ])
 
