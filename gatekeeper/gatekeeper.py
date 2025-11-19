@@ -90,6 +90,14 @@ class Gatekeeper:
         self.nominal_u_traj = nominal_u_traj
 
     def _generate_nominal_trajectory(self, initial_state, goal, horizon):
+        # Handle edge case: zero horizon means return empty trajectory
+        if horizon < self.dt:
+            # Return empty arrays with correct shape
+            initial_state_flat = initial_state.flatten()
+            x_traj = np.empty((0, len(initial_state_flat)))  # Shape: (0, nx)
+            u_traj = np.empty((0, 2))  # Shape: (0, nu) - assuming 2D control
+            return x_traj, u_traj
+        
         # Create the time evaluation points.
         t_eval = np.linspace(0, horizon, int(horizon / self.dt) + 1)
 
@@ -110,6 +118,14 @@ class Gatekeeper:
         return x_traj, u_traj
 
     def _generate_backup_trajectory(self, initial_state, goal, horizon):
+        # Handle edge case: zero horizon means return empty trajectory
+        if horizon < self.dt:
+            # Return empty arrays with correct shape
+            initial_state_flat = initial_state.flatten()
+            x_traj = np.empty((0, len(initial_state_flat)))  # Shape: (0, nx)
+            u_traj = np.empty((0, 2))  # Shape: (0, nu) - assuming 2D control
+            return x_traj, u_traj
+        
         # don't use goal for backup trajectory in this implementation
         t_eval = np.linspace(0, horizon, int(horizon / self.dt) + 1)
 

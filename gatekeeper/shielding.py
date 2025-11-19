@@ -90,6 +90,14 @@ class Shielding:
         self.nominal_u_traj = nominal_u_traj
 
     def _generate_nominal_trajectory(self, initial_state, goal, horizon):
+        # Handle edge case: zero horizon means return empty trajectory
+        if horizon < self.dt:
+            # Return empty arrays with correct shape
+            initial_state_flat = initial_state.flatten()
+            x_traj = np.empty((0, len(initial_state_flat)))  # Shape: (0, nx)
+            u_traj = np.empty((0, 2))  # Shape: (0, nu) - assuming 2D control
+            return x_traj, u_traj
+        
         # Create the time evaluation points.
         t_eval = np.linspace(0, horizon, int(horizon / self.dt) + 1)
 
@@ -126,6 +134,8 @@ class Shielding:
         return x_traj, u_traj
         
     def _generate_candidate_trajectory(self, goal, discounted_nominal_horizon):
+        current_state = self.robot.X
+        
         if self.nominal_controller is None and self.backup_controller is None:
             # if no controllers are provided, return current candidate trajectory
             # in this case, the nominal trajectory is assumed to be externally updated
@@ -133,10 +143,14 @@ class Shielding:
             nominal_u_traj = self.nominal_u_traj[:int(discounted_nominal_horizon//self.dt)]
         else:
             # Generate the candidate trajectory using the nominal and backup controllers
-            current_state = self.robot.X
             nominal_x_traj, nominal_u_traj = self._generate_nominal_trajectory(current_state, goal, discounted_nominal_horizon)
 
-        state_at_backup = nominal_x_traj[-1]  # last state of the nominal trajectory
+        # If nominal trajectory is empty (zero horizon), backup starts from current state
+        if len(nominal_x_traj) == 0:
+            state_at_backup = current_state.flatten()
+        else:
+            state_at_backup = nominal_x_traj[-1]  # last state of the nominal trajectory
+        
         backup_x_traj, backup_u_traj = self._generate_backup_trajectory(state_at_backup, goal, self.backup_horizon)
 
         self.candidate_x_traj = np.vstack((nominal_x_traj, backup_x_traj))
@@ -219,9 +233,9 @@ class Shielding:
                 # if discounted_nominal_horizon > self.nominal_horizon:
                 #     discounted_nominal_horizon = self.nominal_horizon
                 
-                # Ensure minimum trajectory length
-                if discounted_nominal_horizon < self.dt:
-                    discounted_nominal_horizon = self.dt
+                # # Ensure minimum trajectory length
+                # if discounted_nominal_horizon < self.dt:
+                #     discounted_nominal_horizon = 0.0
                 
                 # Generate candidate: nominal (from current) + backup (from end of nominal)
                 candidate_x_traj = self._generate_candidate_trajectory(goal, discounted_nominal_horizon)
@@ -238,8 +252,8 @@ class Shielding:
             discounted_nominal_horizon = last_safe_i * self.horizon_discount
             # if discounted_nominal_horizon > self.nominal_horizon:
             #     discounted_nominal_horizon = self.nominal_horizon
-            if discounted_nominal_horizon < self.dt:
-                discounted_nominal_horizon = self.dt
+            # if discounted_nominal_horizon < self.dt:
+            #     discounted_nominal_horizon = 0.0
                 
             # Generate and commit the last safe trajectory
             self._generate_candidate_trajectory(goal, discounted_nominal_horizon)

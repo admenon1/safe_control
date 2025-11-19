@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.animation as animation
 import sys
 import os
 from robots.robot import BaseRobot
@@ -40,7 +41,7 @@ class HighwayEnvironmentConfig:
         self.lane_margin = 0.5
 
         # Backup controller parameters
-        self.backup_time = 4 # Match backup horizon for responsive lane changes
+        self.backup_time = 10# Match backup horizon for responsive lane changes
         self.backup_zeta = 0.7
         self.omega_max_backup = 0.5
 
@@ -239,6 +240,9 @@ class HighwayController:
         self._backup_traj_lines = []
         self._nominal_traj_lines = []
         self.obs = np.empty((0, 7))
+        
+        # Video recording
+        self.frames = []  # Store frames for video export
 
         # Safety controller (selected based on controller_type)
         self.safety_controller = None
@@ -451,6 +455,39 @@ class HighwayController:
 
         return return_val
 
+    def save_video(self, filename='highway_simulation.mp4', fps=20):
+        """Save collected frames as video."""
+        if not self.frames:
+            print("No frames to save. Run simulation with save_animation=True.")
+            return
+        
+        print(f"Saving video to {filename}...")
+        
+        # Create animation from frames
+        fig_temp = plt.figure(figsize=(12, 6))
+        ax_temp = fig_temp.add_subplot(111)
+        ax_temp.axis('off')
+        
+        im = ax_temp.imshow(self.frames[0])
+        
+        def update_frame(frame_idx):
+            im.set_array(self.frames[frame_idx])
+            return [im]
+        
+        anim = animation.FuncAnimation(
+            fig_temp, update_frame, frames=len(self.frames),
+            interval=1000/fps, blit=True
+        )
+        
+        # Save using ffmpeg writer
+        Writer = animation.writers['ffmpeg']
+        writer = Writer(fps=fps, metadata=dict(artist='Highway Simulation'), bitrate=1800)
+        anim.save(filename, writer=writer)
+        
+        plt.close(fig_temp)
+        print(f"Video saved successfully: {filename}")
+        print(f"Total frames: {len(self.frames)}, Duration: {len(self.frames)/fps:.2f}s")
+    
     def draw_plot(self, pause=0.01):
         """Update visualization."""
         if not self.show_animation:
@@ -525,8 +562,18 @@ class HighwayController:
             self._lane_patches.extend(lane_patches)
 
         # Refresh plot
-        self.fig.canvas.draw_idle()
+        self.fig.canvas.draw()
         self.fig.canvas.flush_events()
+        
+        # Capture frame for video if saving animation (after all drawing is complete)
+        if self.save_animation:
+            # Convert canvas to image array
+            buf = self.fig.canvas.buffer_rgba()
+            img = np.asarray(buf)
+            # Convert RGBA to RGB
+            img = img[:, :, :3].copy()  # Make a copy to avoid reference issues
+            self.frames.append(img)
+        
         plt.pause(pause)
 
 
@@ -608,7 +655,7 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
     )
 
     # Set waypoint
-    waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
+    waypoints = np.array([[40.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
 
     # Add traffic obstacles
@@ -617,13 +664,13 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
             "x": 15.0,
             "y": env.lane_centers[1],
             "radius": 1.0,
-            "vx": 0.5  # slower-moving obstacle in lane 2
-        }
+            "vx": 0.5 # slower-moving obstacle in lane 2
+        },
         # {
         #     "x": 10.0,
         #     "y": env.lane_centers[0],
         #     "radius": 1.0,
-        #     "vx": 1.0  # slower obstacle in same lane as ego (lane 1)
+        #     "vx": 1.35  # slower obstacle in same lane as ego (lane 1)
         # }
     ])
 
@@ -654,6 +701,12 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
     finally:
         print("Simulation complete.")
         print(f"Total steps: {step_count}")
+        
+        # Save video if requested
+        if save_animation and controller.frames:
+            video_filename = f"highway_{controller_type}_{step_count}steps.mp4"
+            controller.save_video(video_filename, fps=20)
+        
         plt.ioff()
         plt.show()
 
@@ -661,14 +714,35 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
 if __name__ == "__main__":
     import sys
     
-    # Parse command line argument for controller type
+    # Parse command line arguments
     controller_type = 'backup_cbf'  # default
-    if len(sys.argv) > 1:
-        controller_type = sys.argv[1].lower()
-        if controller_type not in ['backup_cbf', 'gatekeeper', 'shielding']:
-            print(f"Unknown controller type: {controller_type}")
-            print("Valid options: 'backup_cbf', 'gatekeeper', 'shielding'")
-            sys.exit(1)
+    save_video = False
+    
+    # Parse arguments
+    for arg in sys.argv[1:]:
+        if arg.lower() in ['backup_cbf', 'gatekeeper', 'shielding']:
+            controller_type = arg.lower()
+        elif arg.lower() in ['--save-video', '-s', '--video']:
+            save_video = True
+        elif arg.lower() in ['--help', '-h']:
+            print("Usage: python highway_main.py [controller_type] [--save-video]")
+            print("\nController types:")
+            print("  backup_cbf  - Backup CBF-QP controller (default)")
+            print("  gatekeeper  - Gatekeeper algorithm")
+            print("  shielding   - Shielding algorithm")
+            print("\nOptions:")
+            print("  --save-video, -s  Save simulation as MP4 video")
+            print("\nExample:")
+            print("  python highway_main.py shielding --save-video")
+            sys.exit(0)
+    
+    if controller_type not in ['backup_cbf', 'gatekeeper', 'shielding']:
+        print(f"Unknown controller type: {controller_type}")
+        print("Valid options: 'backup_cbf', 'gatekeeper', 'shielding'")
+        sys.exit(1)
     
     print(f"Running highway scenario with controller: {controller_type}")
-    highway_scenario_main(controller_type=controller_type, save_animation=True)
+    if save_video:
+        print("Video recording enabled")
+    
+    highway_scenario_main(controller_type=controller_type, save_animation=save_video)
