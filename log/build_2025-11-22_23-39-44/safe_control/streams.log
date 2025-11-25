@@ -1,8 +1,0 @@
-[0.417s] Invoking command in '/home/aswin/safe_control/build/safe_control': PS1=(dasc_env) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/aswin/safe_control/build/safe_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/aswin/safe_control/install/safe_control/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dasc_env) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/aswin/safe_control/build/safe_control/build --no-deps
-[0.541s] usage: setup.py [global_opts] cmd1 [cmd1_opts] [cmd2 [cmd2_opts] ...]
-[0.541s]    or: setup.py --help [cmd1 cmd2 ...]
-[0.541s]    or: setup.py --help-commands
-[0.541s]    or: setup.py cmd --help
-[0.541s] 
-[0.541s] error: option --editable not recognized
-[0.552s] Invoked command in '/home/aswin/safe_control/build/safe_control' returned '1': PS1=(dasc_env) \[\e]0;\u@\h: \w\a\]${debian_chroot:+($debian_chroot)}\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[00m\]\$ PYTHONPATH=/home/aswin/safe_control/build/safe_control/prefix_override:/usr/lib/python3/dist-packages/colcon_core/task/python/colcon_distutils_commands:/home/aswin/safe_control/install/safe_control/lib/python3.10/site-packages:${PYTHONPATH} VIRTUAL_ENV_PROMPT=(dasc_env) /usr/bin/python3 -W ignore:setup.py install is deprecated -W ignore:easy_install command is deprecated setup.py develop --editable --build-directory /home/aswin/safe_control/build/safe_control/build --no-deps
