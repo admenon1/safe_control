@@ -85,7 +85,7 @@ class HighwayEnvironmentConfig:
     # ------------------------------------------------------------------
     # Safety CBF (Collision Avoidance)
     # ------------------------------------------------------------------
-    def h_safety(self, x, obs, robot_radius):
+    def h_safety(self, x, obs, robot_radius, t=None):
         """
         Safety CBF: Distance to obstacle minus combined radius.
         h > 0 means safe, h = 0 is boundary, h < 0 is collision.

@@ -215,8 +215,11 @@ class BackupCBFQP:
             x_i = phi[i]
             S_i = S_all[i]
 
-            h_val = self.h_safety_fn(x_i, obs_vec, self.robot_radius)  
-            grad_h = self.grad_h_safety_fn(x_i, obs_vec)               
+            # h_val = self.h_safety_fn(x_i, obs_vec_copy, self.robot_radius)  
+            # grad_h = self.grad_h_safety_fn(x_i, obs_vec_copy)               
+
+            h_val = self.h_safety_fn(x_i, obs_vec, self.robot_radius, i*self.dt)  
+            grad_h = self.grad_h_safety_fn(x_i, obs_vec)  
 
             lhs = grad_h @ S_i @ g0
             rhs = -(grad_h @ S_i @ f0 + self.alpha_fn(h_val))  

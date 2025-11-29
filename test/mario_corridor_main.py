@@ -171,7 +171,7 @@ class CorridorEnvironmentConfig:
     # ------------------------------------------------------------------
     # Safety CBF (Ball Collision Only)
     # ------------------------------------------------------------------
-    def h_safety(self, x, ball, robot_radius):
+    def h_safety(self, x, ball, robot_radius, t=None):
         """
         Simple safety CBF: Ball collision avoidance only.
         
@@ -187,6 +187,11 @@ class CorridorEnvironmentConfig:
         
         # Ball collision avoidance
         bx, by, ball_r = ball[:3]
+        if len(ball) > 3 and t is not None:
+            # Predict ball position at time t
+            vx, vy = ball[3], ball[4]
+            bx += vx * t
+            by += vy * t
         combined_radius = ball_r + robot_radius
         h_ball = (px - bx) ** 2 + (py - by) ** 2 - combined_radius ** 2
         
@@ -230,10 +235,11 @@ class CorridorEnvironmentConfig:
         b = (self.pocket_height / 2.0) - self.pocket_margin
         
         spatial_term = 1.0 - (dx / a)**2 - (dy / b)**2
-        velocity_term = -(v - self.target_speed)**2 + 0.1  # Allow v ≈ 0
+        # velocity_term = -(v - self.target_speed)**2 + 0.1  # Allow v ≈ 0
         
         # Combined: both must be positive
-        h_b = min(spatial_term, velocity_term)
+        # h_b = min(spatial_term, velocity_term)
+        h_b = spatial_term
         return h_b
 
     def grad_h_backup(self, x):
