@@ -162,14 +162,14 @@ class Gatekeeper:
         # print("candidate_x_traj", self.candidate_x_traj)
         return self.candidate_x_traj
 
-    def _is_collision(self, state, obs):
+    def _is_collision(self, state, obs,t):
         # obs has x, y, radius, check collision use two norm
         obsX = obs[0:2]
         d_min = obs[2] + self.robot.robot_radius  # obs radius + robot radius
         h = np.linalg.norm(state[0:2] - obsX[0:2])**2 - d_min**2
         return h < 0
     
-    def _is_candidate_valid(self, candidate_x_traj, unsafe_region):
+    def _is_candidate_valid(self, candidate_x_traj, unsafe_region,t=None):
         """
         Check if the candidate trajectory is valid by evaluating the safety condition.
         """
@@ -178,8 +178,8 @@ class Gatekeeper:
             return True
 
         # Check if the candidate trajectory is within the safe region
-        for state in candidate_x_traj:
-            for obs in unsafe_region:
+        for state in candidate_x_traj:   
+            for obs in unsafe_region: ### what is unsafe region? 
                 if self._is_collision(state, obs):
                     return False
         return True
