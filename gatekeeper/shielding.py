@@ -175,11 +175,21 @@ class Shielding:
         if unsafe_region is None or len(unsafe_region) == 0:
             return True
 
-        # Check if the candidate trajectory is within the safe region
-        for state in candidate_x_traj:
-            for obs in unsafe_region:
-                if self._is_collision(state, obs):
-                    return False
+        # # Check if the candidate trajectory is within the safe region
+        # for state in candidate_x_traj:
+        #     for obs in unsafe_region:
+        #         if self._is_collision(state, obs):
+        #             return False
+        for t,state in enumerate(candidate_x_traj):
+
+            t=t*self.dt  ### since t is t/self.dt, need to convert back to time in seconds
+            #### note: below code assumes the obstacle is moving with constant velocity in x direction only
+            unsafe_region_t=unsafe_region.copy()
+            unsafe_region_t[:,0]=unsafe_region[:,0]+t*unsafe_region[:,3] # x0 + vx * t
+            for obs in unsafe_region_t: ### what is unsafe region? 
+                    if self._is_collision(state, obs):
+                        return False
+                    
         return True
 
     def _update_committed_trajectory(self, discounted_nominal_horizon):
