@@ -68,9 +68,6 @@ class BackupCBFQP:
         self.alpha_fn = None
         self.alpha_b_fn = None
 
-        # State parameters for constraints 
-        self.x_state = cp.Parameter((self.nx, 1), value=np.zeros((self.nx, 1)))
-
     def set_environment_callbacks(self, 
                                  backup_time,
                                  backup_control_fn,
@@ -218,11 +215,8 @@ class BackupCBFQP:
             x_i = phi[i]
             S_i = S_all[i]
 
-            # h_val = self.h_safety_fn(x_i, obs_vec_copy, self.robot_radius)  
-            # grad_h = self.grad_h_safety_fn(x_i, obs_vec_copy)               
-
-            h_val = self.h_safety_fn(x_i, obs_vec, self.robot_radius, i*self.dt)  
-            grad_h = self.grad_h_safety_fn(x_i, obs_vec)  
+            h_val = self.h_safety_fn(x_i, obs_vec, self.robot_radius)  
+            grad_h = self.grad_h_safety_fn(x_i, obs_vec)               
 
             lhs = grad_h @ S_i @ g0
             rhs = -(grad_h @ S_i @ f0 + self.alpha_fn(h_val))  
@@ -244,23 +238,10 @@ class BackupCBFQP:
         G = np.array(G_list)
         h = np.array(h_list)
 
-        # Set the state parameters for constraints
-        x_curr_reshaped = x_curr.reshape(-1, 1) if x_curr.ndim == 1 else x_curr
-        self.x_state.value = x_curr_reshaped
-
         # Solve QP using cvxpy
         u = cp.Variable(self.nu)
         objective = cp.Minimize(cp.sum_squares(u - u_des))
         constraints = [G @ u >= h]
-
-        # Add model specific constraints
-        if self.robot_spec['model'] == 'DynamicUnicycle2D':
-            constraints.extend([
-                cp.abs(u[0]) <= self.robot_spec['a_max'],
-                cp.abs(u[1]) <= self.robot_spec['w_max'],
-                self.x_state[3] <= self.robot_spec['v_max'],
-                self.x_state[3] >= -self.robot_spec['v_max']
-            ])
         prob = cp.Problem(objective, constraints)
         
         try:
