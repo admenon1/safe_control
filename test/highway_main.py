@@ -1,15 +1,27 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.animation as animation
+import sys
+import os
 from robots.robot import BaseRobot
 from backup_cbf.backup_cbf_qp import BackupCBFQP
+from gatekeeper.gatekeeper import Gatekeeper
+from gatekeeper.shielding import Shielding
 
 """
 Created on November 15th, 2025
 @author: Aswin D Menon
+Updated on November 18th, 2025
 ============================================
-Highway scenario using Backup CBF with lane-change backup controller.
-All environment-specific parameters are defined here and given to the BackupCBFQP framework.
+Modular highway scenario supporting multiple safety controllers:
+- backup_cbf 
+- gatekeeper
+- shielding
+
+Usage:
+    python highway_main.py [controller_type]
+    controller_type: 'backup_cbf' (default), 'gatekeeper', or 'shielding'
 """
 
 
@@ -29,7 +41,7 @@ class HighwayEnvironmentConfig:
         self.lane_margin = 0.5
 
         # Backup controller parameters
-        self.backup_time = 10.0
+        self.backup_time = 10.0 # Match backup horizon for responsive lane changes
         self.backup_zeta = 0.7
         self.omega_max_backup = 0.5
 
@@ -57,7 +69,7 @@ class HighwayEnvironmentConfig:
         px, py, theta, v = x[:4]
 
         # Desired settling time and damping
-        T = max(self.backup_time, 1e-3)
+        T = max(self.backup_time, 1e-3) ### 10 does not work for gatekeeper. 4 does not work for backup-CBF
         zeta = self.backup_zeta
 
         # Natural frequency from settling time Ts ≈ 4/(ζ ω_n)
@@ -206,10 +218,12 @@ class HighwayEnv:
 # ========================================================================
 class HighwayController:
     def __init__(self, X0, robot_spec, highway_env, highway_config, dt=0.05, 
+                 controller_type='backup_cbf', nominal_horizon=2.0, backup_horizon=4.0, event_offset=0.5,
                  show_animation=True, save_animation=False, ax=None, fig=None):
         self.highway_env = highway_env
         self.highway_config = highway_config
         self.dt = dt
+        self.controller_type = controller_type
         self.show_animation = show_animation
         self.save_animation = save_animation
         self.ax = ax or plt.axes()
@@ -224,16 +238,45 @@ class HighwayController:
         self._traffic_patches = []
         self._lane_patches = []
         self._backup_traj_lines = []
-        self.obs = np.empty((0, 7))
-
-        self._backup_traj_lines = []  # ← Store line handles
+        self._nominal_traj_lines = []
         self._last_traj_count = 0     # ← Track trajectory count
+        self.obs = np.empty((0, 7))
+       
+        # Video recording
+        self.frames = []  # Store frames for video export
 
-        # Backup CBF-QP filter (generic framework)
-        self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
+        # Safety controller (selected based on controller_type)
+        self.safety_controller = None
+        self.control_ref = None  # For gatekeeper/shielding
         
-        # Inject highway-specific parameters and functions
-        self._configure_backup_cbf()
+        if controller_type == 'backup_cbf':
+            self.safety_controller = BackupCBFQP(self.robot, self.robot_spec)
+            self._configure_backup_cbf()
+        elif controller_type in ['gatekeeper', 'shielding']:
+            if controller_type == 'shielding':
+                self.safety_controller = Shielding(
+                    self.robot, dt=dt, 
+                    nominal_horizon=nominal_horizon,
+                    backup_horizon=backup_horizon,
+                    event_offset=event_offset
+                )
+            else:  # gatekeeper
+                print("Initializing Gatekeeper controller.")
+                self.safety_controller = Gatekeeper(
+                    self.robot, dt=dt,
+                    nominal_horizon=nominal_horizon,
+                    backup_horizon=backup_horizon,
+                    event_offset=event_offset
+                )
+            
+            # Enable visualization
+            self.safety_controller.visualize_backup = robot_spec.get('visualize_backup_set', True)
+            
+            # Set controllers
+            self.safety_controller._set_nominal_controller(self.nominal_controller_wrapper)
+            self.safety_controller._set_backup_controller(self.backup_controller_wrapper)
+        else:
+            raise ValueError(f"Unknown controller_type: {controller_type}. Choose 'backup_cbf', 'gatekeeper', or 'shielding'.")
 
         # Waypoints
         self.waypoints = None
@@ -257,7 +300,7 @@ class HighwayController:
         alpha_b_fn = self.highway_config.alpha_b
 
         # Inject into BackupCBFQP
-        self.backup_cbf_filter.set_environment_callbacks(
+        self.safety_controller.set_environment_callbacks(
             backup_time=self.highway_config.backup_time,
             backup_control_fn=backup_control_fn,
             h_safety_fn=h_safety_fn,
@@ -267,6 +310,14 @@ class HighwayController:
             alpha_fn=alpha_fn,
             alpha_b_fn=alpha_b_fn
         )
+
+    def nominal_controller_wrapper(self, state, goal):
+        """Wrapper for Gatekeeper/Shielding to call nominal controller."""
+        return self.nominal_input_constant_speed(target_speed=self.robot_spec.get('v_nominal', 2.0))
+
+    def backup_controller_wrapper(self, state):
+        """Wrapper for Gatekeeper/Shielding to call backup controller."""
+        return self.highway_config.backup_control(state, self.robot_spec)
 
     def nominal_input_constant_speed(self, target_speed=2.0, **kwargs):
         """
@@ -343,6 +394,15 @@ class HighwayController:
     def set_waypoints(self, waypoints):
         """Set goal waypoints for the ego vehicle."""
         self.waypoints = np.array(waypoints, dtype=float)
+        
+        # Initialize control reference for gatekeeper/shielding
+        if self.controller_type in ['gatekeeper', 'shielding']:
+            goal = self.waypoints[-1] if self.waypoints is not None else np.array([55.0, self.highway_env.lane_centers[0]])
+            self.control_ref = {
+                'goal': goal.reshape(-1, 1),
+                'state_machine': 'track',
+                'u_ref': np.zeros((2, 1))
+            }
 
     def has_reached_goal(self):
         """Check if ego vehicle reached the final waypoint."""
@@ -356,40 +416,85 @@ class HighwayController:
         """Execute one control loop iteration."""
         self._advance_traffic()
 
-        # Nominal control
-        u_des = self.robot.nominal_input(
-            target_speed=self.robot_spec.get('v_nominal', 2.0)
-        ).flatten()
+        if self.controller_type == 'backup_cbf':
+            # Backup CBF-QP mode
+            u_des = self.robot.nominal_input(
+                    target_speed=self.robot_spec.get('v_nominal', 2.0)
+                ).flatten()
 
-        # Find nearest obstacle
-        if self.obs.size > 0:
-            ego_pos = self.robot.get_position()
-            dists = np.linalg.norm(self.obs[:, :2] - ego_pos, axis=1)
-            guard = self.obs[np.argmin(dists)]
-        else:
-            guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
+            # Find nearest obstacle
+            if self.obs.size > 0:
+                ego_pos = self.robot.get_position()
+                dists = np.linalg.norm(self.obs[:, :2] - ego_pos, axis=1)
+                guard = self.obs[np.argmin(dists)]
+            else:
+                guard = np.array([1e6, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0])
 
-        # Apply backup CBF filter
-        u_safe, intervening = self.backup_cbf_filter.backup_cbf_qp(
-            self.robot.X.flatten(), u_des, guard
-        )
-
-        # Step robot dynamics
-        self.robot.step(u_safe.reshape(-1, 1))
+            # Apply backup CBF filter
+            u_safe, intervening = self.safety_controller.backup_cbf_qp(
+                self.robot.X.flatten(), u_des, guard
+            )
+            
+            # Step robot dynamics
+            self.robot.step(u_safe.reshape(-1, 1))
+            return_val = 0 if not intervening else 1
+            
+        elif self.controller_type in ['gatekeeper', 'shielding']:
+            # Gatekeeper/Shielding mode
+            u_safe = self.safety_controller.solve_control_problem(
+                self.robot.X,
+                self.control_ref,
+                self.obs
+            )
+            
+            # Step robot dynamics
+            self.robot.step(u_safe.reshape(-1, 1))
+            return_val = 0
 
         if self.show_animation:
             self.robot.render_plot()
 
-        return 0 if not intervening else 1
+        return return_val
 
+    def save_video(self, filename='highway_simulation.mp4', fps=20):
+        """Save collected frames as video."""
+        if not self.frames:
+            print("No frames to save. Run simulation with save_animation=True.")
+            return
+        
+        print(f"Saving video to {filename}...")
+        
+        # Create animation from frames
+        fig_temp = plt.figure(figsize=(12, 6))
+        ax_temp = fig_temp.add_subplot(111)
+        ax_temp.axis('off')
+        
+        im = ax_temp.imshow(self.frames[0])
+        
+        def update_frame(frame_idx):
+            im.set_array(self.frames[frame_idx])
+            return [im]
+        
+        anim = animation.FuncAnimation(
+            fig_temp, update_frame, frames=len(self.frames),
+            interval=1000/fps, blit=True
+        )
+        
+        # Save using ffmpeg writer
+        Writer = animation.writers['ffmpeg']
+        writer = Writer(fps=fps, metadata=dict(artist='Highway Simulation'), bitrate=1800)
+        anim.save(filename, writer=writer)
+        
+        plt.close(fig_temp)
+        print(f"Video saved successfully: {filename}")
+        print(f"Total frames: {len(self.frames)}, Duration: {len(self.frames)/fps:.2f}s")
+    
     def draw_plot(self, pause=0.01):
-        """Update visualization."""
+        """Update visualization with incremental trajectory drawing for efficiency."""
         if not self.show_animation:
             return
 
-        # ============================================================
-        # Clear and redraw lane patches (these change every frame)
-        # ============================================================
+        # Clear lane patches (need to redraw as view follows ego)
         for patch in self._lane_patches:
             try:
                 patch.remove()
@@ -397,41 +502,96 @@ class HighwayController:
                 pass
         self._lane_patches.clear()
 
-        # Render lanes (follow ego vehicle)
+        # Clear nominal trajectory lines (committed trajectory changes every frame)
+        for line in self._nominal_traj_lines:
+            try:
+                line.remove()
+            except Exception:
+                pass
+        self._nominal_traj_lines.clear()
+
+        # ============================================================
+        # Draw backup trajectories INCREMENTALLY (only new ones)
+        # This is the main efficiency optimization
+        # ============================================================
+        if hasattr(self.safety_controller, 'visualize_backup') and self.safety_controller.visualize_backup:
+            trajs = self.safety_controller.get_backup_trajectories()
+            current_traj_count = len(trajs)
+            
+            # Different colors for different controllers
+            color = 'orange' if self.controller_type in ['backup_cbf', 'gatekeeper'] else 'red'
+
+            # Only draw NEW trajectories (not already drawn ones)
+            if current_traj_count > self._last_traj_count:
+                new_trajs = trajs[self._last_traj_count:]
+                
+                for traj in new_trajs:
+                    line, = self.ax.plot(
+                        traj[:, 0], traj[:, 1],
+                        color=color, linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
+                    )
+                    self._backup_traj_lines.append(line)
+                
+                self._last_traj_count = current_traj_count
+
+        # ============================================================
+        # Draw committed trajectory for gatekeeper/shielding
+        # This MUST be redrawn every frame (it changes as robot moves)
+        # ============================================================
+        if self.controller_type in ['gatekeeper', 'shielding']:
+            if hasattr(self.safety_controller, 'committed_x_traj') and self.safety_controller.committed_x_traj is not None:
+                traj = self.safety_controller.committed_x_traj
+                
+                # Separate nominal and backup portions
+                if hasattr(self.safety_controller, 'committed_horizon'):
+                    nominal_len = int(self.safety_controller.committed_horizon / self.dt)
+                    
+                    # Draw nominal trajectory (green) - current plan
+                    if nominal_len > 0 and nominal_len <= len(traj):
+                        line, = self.ax.plot(
+                            traj[:nominal_len, 0], traj[:nominal_len, 1],
+                            color='green', linestyle='-', linewidth=2.0, alpha=0.8, zorder=2
+                        )
+                        self._nominal_traj_lines.append(line)
+                    
+                    # Draw backup portion of committed trajectory (orange or red)
+                    color = 'orange' if self.controller_type == 'gatekeeper' else 'red'
+                    if nominal_len < len(traj):
+                        line, = self.ax.plot(
+                            traj[nominal_len:, 0], traj[nominal_len:, 1],
+                            color=color, linestyle='--', linewidth=2.0, alpha=0.8, zorder=2
+                        )
+                        self._nominal_traj_lines.append(line)
+
+        # Render lanes (redrawn each frame as view follows ego)
         ego_x = float(self.robot.get_position()[0])
         lane_patches = self.highway_env.render_lanes(self.ax, ego_x=ego_x)
         if lane_patches:
             self._lane_patches.extend(lane_patches)
 
-        # ============================================================
-        # Only redraw NEW backup trajectories
-        # ============================================================
-        if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
-            trajs = self.backup_cbf_filter.get_backup_trajectories()
-            current_traj_count = len(trajs)
-
-            # Only update if NEW trajectories were added
-            if current_traj_count > self._last_traj_count:
-                # Draw only the NEW trajectories (not all of them!)
-                new_trajs = trajs[self._last_traj_count:]
-                
-                for phi in new_trajs:
-                    line, = self.ax.plot(
-                        phi[:, 0], phi[:, 1],
-                        color='orange', linestyle='--', 
-                        linewidth=1.0, alpha=0.7, zorder=2
-                    )
-                    self._backup_traj_lines.append(line)  # Store handle
-                
-                self._last_traj_count = current_traj_count
-
-        # Refresh plot (only changed elements)
-        self.fig.canvas.draw_idle()
-        self.fig.canvas.flush_events()
+        # Refresh plot efficiently
+        if self.save_animation:
+            # Full redraw needed for video capture
+            self.fig.canvas.draw()
+            self.fig.canvas.flush_events()
+        else:
+            # Faster: only process events, blit handles the rest
+            self.fig.canvas.draw_idle()
+            self.fig.canvas.flush_events()
+        
+        # Capture frame for video if saving animation (after all drawing is complete)
+        if self.save_animation:
+            # Convert canvas to image array
+            buf = self.fig.canvas.buffer_rgba()
+            img = np.asarray(buf)
+            # Convert RGBA to RGB
+            img = img[:, :, :3].copy()  # Make a copy to avoid reference issues
+            self.frames.append(img)
+        
         plt.pause(pause)
-    
+
     def clear_backup_trajectories(self):
-        """Optional: Clear old backup trajectory lines."""
+        """Clear old backup trajectory lines and reset counter."""
         for line in self._backup_traj_lines:
             try:
                 line.remove()
@@ -439,20 +599,27 @@ class HighwayController:
                 pass
         self._backup_traj_lines.clear()
         self._last_traj_count = 0
+        self._last_traj_count = 0
 
 
 # ========================================================================
 # Main Simulation Entry Point
 # ========================================================================
-def highway_scenario_main(save_animation=False):
-    """Run the highway scenario with backup CBF control."""
+def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
+    """
+    Run the highway scenario with specified safety controller.
+    
+    Args:
+        controller_type: 'backup_cbf', 'gatekeeper', or 'shielding'
+        save_animation: whether to save animation frames
+    """
     # Create highway environment
     env = HighwayEnv(width=60.0, height=12.0, num_lanes=3)
     
     # Create highway-specific configuration
     highway_config = HighwayEnvironmentConfig(
         lane_centers=env.lane_centers,
-        target_lane_idx=2  # Target rightmost lane
+        target_lane_idx=0  # Target bottom lane (US: fast lane on left/bottom)
     )
 
     # Setup plotting
@@ -462,6 +629,7 @@ def highway_scenario_main(save_animation=False):
     ax.set_aspect('equal')
     ax.set_xlabel("X [m]")
     ax.set_ylabel("Y [m]")
+    ax.set_title(f"Highway Scenario with {controller_type.upper()} Controller")
 
     # Robot specification
     robot_spec = {
@@ -475,14 +643,37 @@ def highway_scenario_main(save_animation=False):
     }
 
     # Initial state [x, y, θ, v]
-    x0 = np.array([-2.0, env.lane_centers[0], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
+    # US system: Start in top lane (lane 2 = slow lane), overtake to bottom lane (lane 0 = fast lane)
+    x0 = np.array([-2.0, env.lane_centers[2], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
+
+    # Controller-specific parameters
+    if controller_type == 'backup_cbf':
+        nominal_horizon = 2.0  # Not used by backup_cbf
+        backup_horizon = 10.0  # Backup CBF horizon
+        event_offset = 0.5     # Not used by backup_cbf
+    elif controller_type == 'gatekeeper':
+        nominal_horizon = 3  # Nominal trajectory duration
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
+        event_offset = 0.5     # Replanning frequency
+    elif controller_type == 'shielding':
+        nominal_horizon = 3  # Maximum nominal trajectory duration to search
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
+        event_offset = 0.5     # Replanning frequency
+    else:
+        nominal_horizon = 2.0
+        backup_horizon = 4.0
+        event_offset = 0.5
 
     # Create controller
     controller = HighwayController(
         X0=x0,
         robot_spec=robot_spec,
         highway_env=env,
-        highway_config=highway_config,  # Pass environment config
+        highway_config=highway_config,
+        controller_type=controller_type,
+        nominal_horizon=nominal_horizon,
+        backup_horizon=backup_horizon,
+        event_offset=event_offset,
         dt=0.05,
         show_animation=True,
         save_animation=save_animation,
@@ -490,37 +681,96 @@ def highway_scenario_main(save_animation=False):
         fig=fig
     )
 
-    # Set waypoint
-    waypoints = np.array([[55.0, env.lane_centers[0], 0.0]])
+    # Set waypoint (US: overtake to bottom/fast lane)
+    waypoints = np.array([[40.0, env.lane_centers[0], 0.0]])
     controller.set_waypoints(waypoints)
 
-    # Add traffic obstacle
+    # Add traffic obstacles
+    # US system: slower traffic in middle lane, ego overtakes from top to bottom
     controller.init_traffic([
         {
             "x": 15.0,
-            "y": env.lane_centers[1],
+            "y": env.lane_centers[1],  # Middle lane
             "radius": 1.0,
-            "vx": 0.5
+            "vx": 0.5  # Slower-moving obstacle
         }
+        # {
+        #     "x": 10.0,
+        #     "y": env.lane_centers[2],  # Top lane (same as ego start)
+        #     "radius": 1.0,
+        #     "vx": 1.1  # Slower obstacle in same lane as ego
+        # }
     ])
 
     # Run simulation
-    print("Starting highway scenario simulation...")
+    print(f"Starting highway scenario simulation with {controller_type.upper()}...")
+    print(f"Nominal horizon: {nominal_horizon}s")
+    print(f"Backup horizon: {backup_horizon}s")
+    if controller_type in ['gatekeeper', 'shielding']:
+        print(f"Event offset: {event_offset}s")
+    
     try:
+        step_count = 0
         while not controller.has_reached_goal():
             controller.control_step()
             controller.draw_plot()
+            step_count += 1
 
             if controller.robot.X[0, 0] >= 55.0:
+                break
+
+            # Safety limit
+            if step_count > 5000:
+                print("Maximum simulation steps reached.")
                 break
 
     except KeyboardInterrupt:
         print("\nSimulation interrupted by user.")
     finally:
         print("Simulation complete.")
+        print(f"Total steps: {step_count}")
+        
+        # Save video if requested
+        if save_animation and controller.frames:
+            video_filename = f"highway_{controller_type}_{step_count}steps.mp4"
+            controller.save_video(video_filename, fps=20)
+        
         plt.ioff()
         plt.show()
 
 
 if __name__ == "__main__":
-    highway_scenario_main(save_animation=False)
+    import sys
+    
+    # Parse command line arguments
+    controller_type = 'backup_cbf'  # default
+    save_video = False
+    
+    # Parse arguments
+    for arg in sys.argv[1:]:
+        if arg.lower() in ['backup_cbf', 'gatekeeper', 'shielding']:
+            controller_type = arg.lower()
+        elif arg.lower() in ['--save-video', '-s', '--video']:
+            save_video = True
+        elif arg.lower() in ['--help', '-h']:
+            print("Usage: python highway_main.py [controller_type] [--save-video]")
+            print("\nController types:")
+            print("  backup_cbf  - Backup CBF-QP controller (default)")
+            print("  gatekeeper  - Gatekeeper algorithm")
+            print("  shielding   - Shielding algorithm")
+            print("\nOptions:")
+            print("  --save-video, -s  Save simulation as MP4 video")
+            print("\nExample:")
+            print("  python highway_main.py shielding --save-video")
+            sys.exit(0)
+    
+    if controller_type not in ['backup_cbf', 'gatekeeper', 'shielding']:
+        print(f"Unknown controller type: {controller_type}")
+        print("Valid options: 'backup_cbf', 'gatekeeper', 'shielding'")
+        sys.exit(1)
+    
+    print(f"Running highway scenario with controller: {controller_type}")
+    if save_video:
+        print("Video recording enabled")
+    
+    highway_scenario_main(controller_type=controller_type, save_animation=save_video)
