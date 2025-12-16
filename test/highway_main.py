@@ -226,6 +226,9 @@ class HighwayController:
         self._backup_traj_lines = []
         self.obs = np.empty((0, 7))
 
+        self._backup_traj_lines = []  # ← Store line handles
+        self._last_traj_count = 0     # ← Track trajectory count
+
         # Backup CBF-QP filter (generic framework)
         self.backup_cbf_filter = BackupCBFQP(self.robot, self.robot_spec)
         
@@ -384,7 +387,9 @@ class HighwayController:
         if not self.show_animation:
             return
 
-        # Clear previous patches
+        # ============================================================
+        # Clear and redraw lane patches (these change every frame)
+        # ============================================================
         for patch in self._lane_patches:
             try:
                 patch.remove()
@@ -392,33 +397,48 @@ class HighwayController:
                 pass
         self._lane_patches.clear()
 
-        for line in self._backup_traj_lines:
-            try:
-                line.remove()
-            except Exception:
-                pass
-        self._backup_traj_lines.clear()
-
-        # Draw backup trajectories
-        if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
-            trajs = self.backup_cbf_filter.get_backup_trajectories()
-            for phi in trajs:
-                line, = self.ax.plot(
-                    phi[:, 0], phi[:, 1],
-                    color='orange', linestyle='--', linewidth=1.0, alpha=0.7, zorder=2
-                )
-                self._backup_traj_lines.append(line)
-
-        # Render lanes
+        # Render lanes (follow ego vehicle)
         ego_x = float(self.robot.get_position()[0])
         lane_patches = self.highway_env.render_lanes(self.ax, ego_x=ego_x)
         if lane_patches:
             self._lane_patches.extend(lane_patches)
 
-        # Refresh plot
+        # ============================================================
+        # Only redraw NEW backup trajectories
+        # ============================================================
+        if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
+            trajs = self.backup_cbf_filter.get_backup_trajectories()
+            current_traj_count = len(trajs)
+
+            # Only update if NEW trajectories were added
+            if current_traj_count > self._last_traj_count:
+                # Draw only the NEW trajectories (not all of them!)
+                new_trajs = trajs[self._last_traj_count:]
+                
+                for phi in new_trajs:
+                    line, = self.ax.plot(
+                        phi[:, 0], phi[:, 1],
+                        color='orange', linestyle='--', 
+                        linewidth=1.0, alpha=0.7, zorder=2
+                    )
+                    self._backup_traj_lines.append(line)  # Store handle
+                
+                self._last_traj_count = current_traj_count
+
+        # Refresh plot (only changed elements)
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
         plt.pause(pause)
+    
+    def clear_backup_trajectories(self):
+        """Optional: Clear old backup trajectory lines."""
+        for line in self._backup_traj_lines:
+            try:
+                line.remove()
+            except:
+                pass
+        self._backup_traj_lines.clear()
+        self._last_traj_count = 0
 
 
 # ========================================================================
@@ -448,6 +468,7 @@ def highway_scenario_main(save_animation=False):
         'model': 'DynamicUnicycle2D',
         'w_max': 0.5,
         'a_max': 0.5,
+        'v_max': 3.0,
         'radius': 1.0,
         'v_nominal': 2.0,
         'visualize_backup_set': True,

@@ -48,7 +48,7 @@ class CorridorEnvironmentConfig:
         self.pivot_point = np.array([pocket_center[0], corridor_center_y])
 
         # Backup controller parameters
-        self.backup_time = 10.0
+        self.backup_time = 15.0
         self.backup_zeta = 0.9
         self.omega_max_backup = 2.0  # VERY AGGRESSIVE turning
         self.target_speed = 0.0
@@ -59,6 +59,8 @@ class CorridorEnvironmentConfig:
         # CBF class-K function parameters
         self.alpha_linear_coeff = 20.0
         self.alpha_b_coeff = 10.0
+
+        self.h_safety_buffer = 0.5
 
     # ------------------------------------------------------------------
     # Backup Controller (Fixed Two-Line Path)
@@ -107,6 +109,7 @@ class CorridorEnvironmentConfig:
         
         # Check if robot is near/above corridor top
         near_pivot = dist_to_pivot < 1.0 or py > (self.corridor_top - 0.5)
+        # near_pivot = np.abs(px - self.pivot_point[0]) < 0.5
         
         if near_pivot:
             # LINE 2: Go to pocket center
@@ -134,6 +137,7 @@ class CorridorEnvironmentConfig:
         
         # Decide forward or backward
         should_reverse = abs(e_psi) > np.pi / 2
+        # should_reverse = px > self.pocket_center[0]
         
         if should_reverse:
             # Flip desired heading for reverse motion
@@ -142,9 +146,10 @@ class CorridorEnvironmentConfig:
             e_psi = theta - theta_desired
             e_psi = np.arctan2(np.sin(e_psi), np.cos(e_psi))
         
-        # Angular velocity
-        k_omega = 4.0
-        omega = -k_omega * e_psi
+        # PD control for angular velocity
+        k_p_omega = 4.0  # Proportional gain
+        k_d_omega = 0.0  # Derivative gain (using theta as derivative term)
+        omega = -k_p_omega * e_psi - k_d_omega * theta
         omega = np.clip(omega, -self.omega_max_backup, self.omega_max_backup)
         
         # ============================================================
@@ -152,17 +157,18 @@ class CorridorEnvironmentConfig:
         # ============================================================
         
         if distance_to_target < 0.5:
-            v_mag = 0.3  # Slow near target
+            v_mag = 0.5  # Slow near target
         elif abs(e_psi) > np.pi / 4:
-            v_mag = 0.5  # Slow when turning
+            v_mag = 0.7  # Slow when turning
         else:
-            v_mag = 1.2  # Normal speed
+            v_mag = 0.9  # Normal speed
         
         v_desired = -v_mag if should_reverse else v_mag
         
-        # Acceleration
-        k_accel = 4.0
-        accel = k_accel * (v_desired - v)
+        # PD control for acceleration
+        k_p_accel = 4.0  # Proportional gain
+        k_d_accel = 0.0  # Derivative gain (using v as derivative term)
+        accel = k_p_accel * (v_desired - v) - k_d_accel * v
         accel = np.clip(accel, -robot_spec.get('a_max', 0.5), 
                               robot_spec.get('a_max', 0.5))
         
@@ -193,7 +199,7 @@ class CorridorEnvironmentConfig:
             bx += vx * t
             by += vy * t
         combined_radius = ball_r + robot_radius
-        h_ball = (px - bx) ** 2 + (py - by) ** 2 - combined_radius ** 2
+        h_ball = (px - bx) ** 2 + (py - by) ** 2 - combined_radius ** 2 - self.h_safety_buffer
         
         return h_ball
 
@@ -382,6 +388,10 @@ class CorridorController:
         # Override robot's nominal controller
         self.robot.nominal_input = self.nominal_input_corridor
 
+        # Add tracking for backup trajectory visualization
+        self._backup_traj_lines = []  # Store line handles
+        self._last_traj_count = 0     # Track when new trajectories are added
+
     def _configure_backup_cbf(self):
         """Inject corridor-specific callbacks into BackupCBFQP."""
         backup_control_fn = lambda x: self.corridor_config.backup_control(x, self.robot_spec)
@@ -403,7 +413,7 @@ class CorridorController:
             alpha_b_fn=alpha_b_fn
         )
 
-    def nominal_input_corridor(self, target_speed=1.5, **kwargs):
+    def nominal_input_corridor(self, target_speed=0.5, **kwargs):
         """
         Nominal controller: Follow corridor centerline at constant speed.
         """
@@ -488,23 +498,46 @@ class CorridorController:
         return 0 if not intervening else 1
 
     def draw_plot(self, pause=0.01):
-        """Update visualization (static view)."""
+        """Update visualization (EFFICIENT VERSION)."""
         if not self.show_animation:
             return
 
-        # Draw backup trajectories
+        # ============================================================
+        # EFFICIENT: Only redraw backup trajectories when new ones added
+        # ============================================================
         if hasattr(self.backup_cbf_filter, 'visualize_backup') and self.backup_cbf_filter.visualize_backup:
             trajs = self.backup_cbf_filter.get_backup_trajectories()
-            for phi in trajs:
-                self.ax.plot(
-                    phi[:, 0], phi[:, 1],
-                    color='orange', linestyle='--', linewidth=1.0, alpha=0.5, zorder=2
-                )
+            current_traj_count = len(trajs)
+            
+            # Only update if NEW trajectories were added
+            if current_traj_count > self._last_traj_count:
+                # Draw only the NEW trajectories (not all of them!)
+                new_trajs = trajs[self._last_traj_count:]
+                
+                for phi in new_trajs:
+                    line, = self.ax.plot(
+                        phi[:, 0], phi[:, 1],
+                        color='orange', linestyle='--', 
+                        linewidth=1.0, alpha=0.5, zorder=2
+                    )
+                    self._backup_traj_lines.append(line)  # Store handle
+                
+                self._last_traj_count = current_traj_count
 
-        # Refresh plot
+        # Refresh plot (only changed elements)
         self.fig.canvas.draw_idle()
         self.fig.canvas.flush_events()
         plt.pause(pause)
+
+    def clear_backup_trajectories(self):
+        """Optional: Clear old backup trajectory lines."""
+        for line in self._backup_traj_lines:
+            try:
+                line.remove()
+            except:
+                pass
+        self._backup_traj_lines.clear()
+        self._last_traj_count = 0
 
 
 # ========================================================================
@@ -563,15 +596,16 @@ def corridor_scenario_main(save_animation=False):
     # Robot specification
     robot_spec = {
         'model': 'DynamicUnicycle2D',
-        'w_max': 0.5,
-        'a_max': 0.5,
+        'w_max': 50.0,
+        'a_max': 50.0,
+        'v_max': 0.9,
         'radius': 0.3,
         'v_nominal': 0.5,  # Slower than ball
         'visualize_backup_set': True,
     }
 
     # Initial state [x, y, θ, v] - start in corridor
-    x0 = np.array([5, corridor_center_y, 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
+    x0 = np.array([5, corridor_center_y, np.deg2rad(0.0), robot_spec['v_nominal']]).reshape(-1, 1)
 
     # Create controller
     controller = CorridorController(
