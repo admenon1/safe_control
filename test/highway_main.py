@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
+import matplotlib.transforms as transforms
 import matplotlib.animation as animation
 import sys
 import os
@@ -180,6 +181,76 @@ class HighwayEnvironmentConfig:
 # ========================================================================
 # Highway Environment (Visualization)
 # ========================================================================
+
+# Car colors for different vehicles
+CAR_COLORS = {
+    'ego': '#2E86AB',      # Blue for ego vehicle
+    'traffic': ['#E74C3C', '#F39C12', '#9B59B6', '#1ABC9C', '#E67E22'],  # Red, Orange, Purple, Teal, Dark Orange
+}
+
+def draw_car(ax, x, y, theta, length=4.0, width=2.0, color='blue', alpha=0.9, zorder=5):
+    """
+    Draw a car as a rectangle with rounded appearance.
+    
+    Args:
+        ax: matplotlib axis
+        x, y: center position
+        theta: heading angle in radians
+        length: car length (default 4.0m)
+        width: car width (default 2.0m) 
+        color: fill color
+        alpha: transparency
+        zorder: drawing order
+    
+    Returns:
+        list of patches created
+    """
+    # Car body (rectangle centered at origin, then transformed)
+    car_body = patches.FancyBboxPatch(
+        (-length/2, -width/2), length, width,
+        boxstyle=patches.BoxStyle("Round", pad=0.1),
+        facecolor=color,
+        edgecolor='black',
+        linewidth=1.5,
+        alpha=alpha,
+        zorder=zorder
+    )
+    
+    # Windshield (front)
+    windshield_front = patches.FancyBboxPatch(
+        (length/6, -width/2.5), length/5, width/1.25,
+        boxstyle=patches.BoxStyle("Round", pad=0.05),
+        facecolor='lightblue',
+        edgecolor='darkblue',
+        linewidth=0.5,
+        alpha=0.8,
+        zorder=zorder+1
+    )
+    
+    # Windshield (rear)
+    windshield_rear = patches.FancyBboxPatch(
+        (-length/3, -width/2.5), length/6, width/1.25,
+        boxstyle=patches.BoxStyle("Round", pad=0.05),
+        facecolor='lightblue',
+        edgecolor='darkblue', 
+        linewidth=0.5,
+        alpha=0.8,
+        zorder=zorder+1
+    )
+    
+    # Apply rotation and translation
+    t = transforms.Affine2D().rotate(theta).translate(x, y) + ax.transData
+    car_body.set_transform(t)
+    windshield_front.set_transform(t)
+    windshield_rear.set_transform(t)
+    
+    ax.add_patch(car_body)
+    ax.add_patch(windshield_front)
+    ax.add_patch(windshield_rear)
+    
+    return [car_body, windshield_front, windshield_rear]
+
+
 class HighwayEnv:
     def __init__(self, width=60.0, height=12.0, num_lanes=3):
         self.width = width
@@ -190,6 +261,28 @@ class HighwayEnv:
             (i + 0.5) * self.lane_width 
             for i in range(num_lanes)
         ]
+        # Road appearance
+        self.road_color = '#3D3D3D'  # Dark grey asphalt
+        self.lane_marking_color = 'white'
+        self.edge_line_color = 'white'
+
+    def render_road_surface(self, ax, ego_x=None):
+        """Draw the road surface."""
+        if ego_x is not None:
+            margin = 20.0
+            ax.set_xlim(ego_x - margin, ego_x + margin)
+        
+        x0, x1 = ax.get_xlim()
+        
+        # Road surface (dark grey)
+        road = patches.Rectangle(
+            (x0, 0), x1 - x0, self.height,
+            facecolor=self.road_color,
+            edgecolor='none',
+            zorder=0
+        )
+        ax.add_patch(road)
+        return [road]
 
     def render_lanes(self, ax, ego_x=None):
         """Draw lane markings and update view to follow ego vehicle."""
@@ -197,18 +290,48 @@ class HighwayEnv:
 
         # Follow ego vehicle
         if ego_x is not None:
-            margin = 15.0
+            margin = 20.0
             ax.set_xlim(ego_x - margin, ego_x + margin)
 
         x0, x1 = ax.get_xlim()
+        
+        # Draw road surface first
+        road = patches.Rectangle(
+            (x0, 0), x1 - x0, self.height,
+            facecolor=self.road_color,
+            edgecolor='none',
+            zorder=0
+        )
+        ax.add_patch(road)
+        created.append(road)
 
-        # Draw lane boundaries
-        for i in range(self.num_lanes + 1):
+        # Draw edge lines (solid white) at top and bottom
+        line_top, = ax.plot([x0, x1], [self.height, self.height], 
+                           color=self.edge_line_color, linewidth=3.0, 
+                           solid_capstyle='butt', zorder=1)
+        line_bottom, = ax.plot([x0, x1], [0, 0], 
+                              color=self.edge_line_color, linewidth=3.0,
+                              solid_capstyle='butt', zorder=1)
+        created.extend([line_top, line_bottom])
+
+        # Draw lane dividers (dashed white lines)
+        dash_length = 3.0  # Length of each dash
+        gap_length = 2.0   # Gap between dashes
+        
+        for i in range(1, self.num_lanes):  # Interior lane boundaries only
             y = i * self.lane_width
-            line1, = ax.plot([x0, x1], [y, y], color='black', linewidth=1.0, zorder=0)
-            line2, = ax.plot([x0, x1], [y, y], color='blue', linestyle='--', linewidth=0.6, zorder=0)
-            created.append(line1)
-            created.append(line2)
+            
+            # Draw dashed line
+            x = x0
+            while x < x1:
+                dash_end = min(x + dash_length, x1)
+                line, = ax.plot([x, dash_end], [y, y], 
+                               color=self.lane_marking_color, 
+                               linewidth=2.0, 
+                               solid_capstyle='butt',
+                               zorder=1)
+                created.append(line)
+                x += dash_length + gap_length
 
         return created
 
@@ -239,10 +362,15 @@ class HighwayController:
         self._lane_patches = []
         self._backup_traj_lines = []
         self._nominal_traj_lines = []
+        self._ego_car_patches = []  # Ego vehicle car shape
         self.obs = np.empty((0, 7))
         
         # Video recording
         self.frames = []  # Store frames for video export
+        
+        # Hide the default robot circle body (we'll draw our own car shape)
+        if hasattr(self.robot, 'body'):
+            self.robot.body.set_visible(False)
 
         # Safety controller (selected based on controller_type)
         self.safety_controller = None
@@ -381,14 +509,31 @@ class HighwayController:
         if not self._traffic:
             return
 
+        # Remove old car patches
+        for patch in self._traffic_patches:
+            try:
+                patch.remove()
+            except:
+                pass
+        self._traffic_patches.clear()
+
+        # Update positions and redraw cars
+        new_patches = []
         for idx, car in enumerate(self._traffic):
             car["x"] += car.get("vx", 0.0) * self.dt
             car["y"] += car.get("vy", 0.0) * self.dt
             self.obs[idx, 0] = car["x"]
             self.obs[idx, 1] = car["y"]
 
-            if idx < len(self._traffic_patches):
-                self._traffic_patches[idx].center = (car["x"], car["y"])
+            # Redraw car at new position
+            car_patches = draw_car(
+                self.ax, car["x"], car["y"], car.get("theta", 0.0),
+                length=car.get("length", 3.5), width=car.get("width", 1.8),
+                color=car.get("color", 'red'), alpha=0.95, zorder=4
+            )
+            new_patches.extend(car_patches)
+        
+        self._traffic_patches = new_patches
 
     def set_waypoints(self, waypoints):
         """Set goal waypoints for the ego vehicle."""
@@ -514,6 +659,14 @@ class HighwayController:
             except Exception:
                 pass
         self._nominal_traj_lines.clear()
+        
+        # Clear ego car patches
+        for patch in self._ego_car_patches:
+            try:
+                patch.remove()
+            except Exception:
+                pass
+        self._ego_car_patches.clear()
 
         # Draw backup trajectories (common for all controllers)
         if hasattr(self.safety_controller, 'visualize_backup') and self.safety_controller.visualize_backup:
@@ -555,11 +708,25 @@ class HighwayController:
                         )
                         self._backup_traj_lines.append(line)
 
-        # Render lanes
+        # Render lanes first (background)
         ego_x = float(self.robot.get_position()[0])
         lane_patches = self.highway_env.render_lanes(self.ax, ego_x=ego_x)
         if lane_patches:
             self._lane_patches.extend(lane_patches)
+        
+        # Draw ego vehicle as car shape
+        ego_y = float(self.robot.X[1, 0])
+        ego_theta = float(self.robot.X[2, 0]) if len(self.robot.X) > 2 else 0.0
+        car_length = self.robot_spec.get('car_length', 4.2)
+        car_width = self.robot_spec.get('car_width', 1.9)
+        car_color = self.robot_spec.get('car_color', CAR_COLORS['ego'])
+        
+        ego_patches = draw_car(
+            self.ax, ego_x, ego_y, ego_theta,
+            length=car_length, width=car_width,
+            color=car_color, alpha=0.95, zorder=6
+        )
+        self._ego_car_patches.extend(ego_patches)
 
         # Refresh plot
         self.fig.canvas.draw()
@@ -594,7 +761,7 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
     # Create highway-specific configuration
     highway_config = HighwayEnvironmentConfig(
         lane_centers=env.lane_centers,
-        target_lane_idx=2  # Target rightmost lane
+        target_lane_idx=0  # Target bottom lane (US: pass on left/bottom)
     )
 
     # Setup plotting
@@ -611,13 +778,16 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
         'model': 'DynamicUnicycle2D',
         'w_max': 0.5,
         'a_max': 0.5,
-        'radius': 1.0,
+        'radius': 2.5,  # Collision radius: sqrt(4.0^2 + 1.8^2)/2 ≈ 2.2m, add margin
         'v_nominal': 2.0,
         'visualize_backup_set': True,
+        'car_length': 4.0,   # Car visual length (bounded by collision radius)
+        'car_width': 1.8,    # Car visual width
+        'car_color': CAR_COLORS['ego'],  # Ego car color
     }
 
     # Initial state [x, y, θ, v]
-    x0 = np.array([-2.0, env.lane_centers[0], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
+    x0 = np.array([-2.0, env.lane_centers[2], 0.0, robot_spec['v_nominal']]).reshape(-1, 1)
 
     # Controller-specific parameters
     if controller_type == 'backup_cbf':
@@ -625,12 +795,12 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
         backup_horizon = 10.0  # Backup CBF horizon
         event_offset = 0.5     # Not used by backup_cbf
     elif controller_type == 'gatekeeper':
-        nominal_horizon = 6  # Nominal trajectory duration
-        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 3  # Nominal trajectory duration
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     elif controller_type == 'shielding':
-        nominal_horizon = 6  # Maximum nominal trajectory duration to search
-        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 3  # Maximum nominal trajectory duration to search
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     else:
         nominal_horizon = 2.0
@@ -655,23 +825,29 @@ def highway_scenario_main(controller_type='backup_cbf', save_animation=False):
     )
 
     # Set waypoint
-    waypoints = np.array([[40.0, env.lane_centers[0], 0.0]])
+    waypoints = np.array([[40.0, env.lane_centers[2], 0.0]])
     controller.set_waypoints(waypoints)
 
-    # Add traffic obstacles
+    # Add traffic obstacles (US system: ego in top lane, passes to bottom)
     controller.init_traffic([
         {
             "x": 15.0,
             "y": env.lane_centers[1],
-            "radius": 1.0,
-            "vx": 0.5 # slower-moving obstacle in lane 2
+            "radius": 2.2,  # Collision radius: sqrt(3.8^2 + 1.7^2)/2 ≈ 2.1m
+            "length": 3.8,
+            "width": 1.7,
+            "vx": 0.5,
+            "color": "#E74C3C"  # Red car
         },
-        # {
-        #     "x": 10.0,
-        #     "y": env.lane_centers[0],
-        #     "radius": 1.0,
-        #     "vx": 1.35  # slower obstacle in same lane as ego (lane 1)
-        # }
+        {
+            "x": 10.0,
+            "y": env.lane_centers[2],
+            "radius": 2.3,  # Collision radius: sqrt(4.0^2 + 1.8^2)/2 ≈ 2.2m
+            "length": 4.0,
+            "width": 1.8,
+            "vx": 1.15,
+            "color": "#F39C12"  # Orange car
+        }
     ])
 
     # Run simulation

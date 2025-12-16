@@ -355,7 +355,7 @@ class CorridorEnv:
 class CorridorController:
     def __init__(self, X0, robot_spec, corridor_env, corridor_config, 
                  ball_params, dt=0.05, 
-                 controller_type='backup_cbf', nominal_horizon=2.0, backup_horizon=4.0, event_offset=0.5,
+                 controller_type='backup_cbf', nominal_horizon=4.0, backup_horizon=4.0, event_offset=0.5,
                  show_animation=True, save_animation=False, ax=None, fig=None):
         self.corridor_env = corridor_env
         self.corridor_config = corridor_config
@@ -456,6 +456,7 @@ class CorridorController:
     def nominal_input_corridor(self, target_speed=1.5, **kwargs):
         """
         Nominal controller: Follow corridor centerline at constant speed.
+        Uses smoother control when far from centerline (e.g., in pocket).
         """
         X = self.robot.X
         py = X[1, 0]
@@ -472,7 +473,13 @@ class CorridorController:
         
         # Lateral centering + heading alignment
         y_error = py - self.corridor_env.corridor_center_y
-        omega = -k_y * y_error - 0.5 * theta
+        
+        # Saturate y_error to avoid aggressive turning when far from centerline
+        # (e.g., when in pocket, y_error = 3m → saturate to 1m equivalent)
+        max_y_error = 1.5  # Maximum error to use for control (meters)  ## stabler, but safety not guaranteed?
+        y_error_saturated = np.clip(y_error, -max_y_error, max_y_error)
+        
+        omega = -k_y * y_error_saturated - 0.5 * theta
         
         # Clip to limits
         accel = np.clip(accel, -self.robot_spec['a_max'], self.robot_spec['a_max'])
@@ -750,16 +757,16 @@ def corridor_scenario_main(controller_type='backup_cbf', save_animation=False):
         backup_horizon = 10.0  # Backup CBF horizon
         event_offset = 0.5     # Not used by backup_cbf
     elif controller_type == 'gatekeeper':
-        nominal_horizon = 6  # Nominal trajectory duration
-        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 3 # Nominal trajectory duration
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     elif controller_type == 'shielding':
-        nominal_horizon = 6  # Maximum nominal trajectory duration to search
-        backup_horizon = 6   # Backup trajectory duration (from end of nominal)
+        nominal_horizon = 3  # Maximum nominal trajectory duration to search
+        backup_horizon = 3   # Backup trajectory duration (from end of nominal)
         event_offset = 0.5     # Replanning frequency
     else:
-        nominal_horizon = 2.0
-        backup_horizon = 4.0
+        nominal_horizon = 3.0
+        backup_horizon = 3.0
         event_offset = 0.5
 
     # Create controller

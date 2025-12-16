@@ -151,7 +151,7 @@ class Gatekeeper:
             # Generate the candidate trajectory using the nominal and backup controllers
             current_state = self.robot.X
             nominal_x_traj, nominal_u_traj = self._generate_nominal_trajectory(current_state, goal, discounted_nominal_horizon)
-        #print(f"Generated nominal traj inside func: {nominal_x_traj.shape}") # Shape : (121,4) # assume 121 are the future time steps
+        print(f"Generated nominal traj inside func: {nominal_x_traj.shape}") # Shape : (121,4) # assume 121 are the future time steps
         state_at_backup = nominal_x_traj[-1]  # last state of the nominal trajectory
         backup_x_traj, backup_u_traj = self._generate_backup_trajectory(state_at_backup, goal, self.backup_horizon)
 
@@ -162,39 +162,48 @@ class Gatekeeper:
         # print("candidate_x_traj", self.candidate_x_traj)
         return self.candidate_x_traj
 
-    def _is_collision(self, state, obs):
+    def _is_collision(self, state, obs, obs_safety_margin=0.0):
         # obs has x, y, radius, check collision use two norm
         obsX = obs[0:2]
-        d_min = obs[2] + self.robot.robot_radius  # obs radius + robot radius
+        d_min = obs[2] + self.robot.robot_radius + obs_safety_margin  # obs radius + robot radius + margin
         h = np.linalg.norm(state[0:2] - obsX[0:2])**2 - d_min**2
         return h < 0
     
-    def _is_candidate_valid(self, candidate_x_traj, unsafe_region):
+    def _is_candidate_valid(self, candidate_x_traj, unsafe_region, obs_safety_margin=0.1):
         """
         Check if the candidate trajectory is valid by evaluating the safety condition.
+        Uses stricter checking with safety margin and accounts for moving obstacles.
+        
+        Args:
+            candidate_x_traj: Trajectory to validate (n_steps, state_dim)
+            unsafe_region: Obstacle data [x, y, radius, vx, vy, ...] 
+            safety_margin: Additional buffer distance for conservative checking
         """
         
         if unsafe_region is None or len(unsafe_region) == 0:
             return True
+        
+        # Ensure unsafe_region is 2D array
+        if unsafe_region.ndim == 1:
+            unsafe_region = unsafe_region.reshape(1, -1)
+            
         # print(f"Unsafe region shape: {unsafe_region.shape if unsafe_region is not None else 'None'}")
-        # print(f"unsafe_region: {unsafe_region}") ## ball_params['x0'], ball_params['y0'], ball_params['radius'],ball_params['vx'], 0.0, 0.0, 0.0
         # print(f"candidate_x_traj shape: {candidate_x_traj.shape}")
-        # print(f"candidate_x_traj: {candidate_x_traj}")  ### n_steps,4 (x,y,theta,v) (maybe)
 
         for t,state in enumerate(candidate_x_traj):
 
             t=t*self.dt  ### since t is t/self.dt, need to convert back to time in seconds
-            #### note: below code assumes the obstacle is moving with constant velocity in x direction only
+            #### note: below code assumes the obstacle = is moving with constant velocity in x direction only
             unsafe_region_t=unsafe_region.copy()
             unsafe_region_t[:,0]=unsafe_region[:,0]+t*unsafe_region[:,3] # x0 + vx * t
             for obs in unsafe_region_t: ### what is unsafe region? 
-                    if self._is_collision(state, obs):
+                    if self._is_collision(state, obs, obs_safety_margin):
                         return False
         return True
 
     def _update_committed_trajectory(self, discounted_nominal_horizon):
         """
-        Update the committed trajectory with the
+        Update the committed trajectory with the candidate trajectory.
         """
         self.committed_x_traj = self.candidate_x_traj
         self.committed_u_traj = self.candidate_u_traj
