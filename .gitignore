@@ -11,3 +11,6 @@ __pycache__/
 output/
 
 venv/
+
+dasc_mac/
+.dasc_mac/
