@@ -13,3 +13,5 @@ output/
 venv/
 
 dasc_env/
+
+dasc_mac/
