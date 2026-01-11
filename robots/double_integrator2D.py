@@ -34,6 +34,8 @@ class DoubleIntegrator2D:
         '''
         self.dt = dt
         self.robot_spec = robot_spec
+        
+        self.robot_spec.setdefault('model', 'DoubleIntegrator2D')
 
         self.robot_spec.setdefault('a_max', 1.0)
         self.robot_spec.setdefault('v_max', 1.0)
@@ -76,6 +78,17 @@ class DoubleIntegrator2D:
 
     def step(self, X, U):
         X = X + (self.f(X) + self.g(X) @ U) * self.dt
+        
+        # Enforce velocity limits if specified
+        v_max = self.robot_spec.get('v_max')
+        if v_max is not None:
+            vx, vy = X[2, 0], X[3, 0]
+            v_mag = np.sqrt(vx**2 + vy**2)
+            if v_mag > v_max:
+                scale = v_max / v_mag
+                X[2, 0] *= scale
+                X[3, 0] *= scale
+                
         return X
 
     def step_rotate(self, theta, U_attitude):
