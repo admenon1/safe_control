@@ -50,6 +50,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Union
+import os
 
 from safe_control.envs.drifting_env import DriftingEnv
 from safe_control.robots.drifting_car import DriftingCar, DriftingCarSimulator
@@ -83,7 +84,7 @@ BACKUP_TYPES = ['lane_change', 'stop']
 class TrackConfig:
     """Track configuration parameters."""
     track_type: str = 'straight'
-    track_length: float = 300.0
+    track_length: float = 150.0
     lane_width: float = 4.0
     num_lanes: int = 5
 
@@ -146,8 +147,8 @@ class SimulationConfig:
     """Simulation configuration parameters."""
     dt: float = 0.05
     tf: float = 14.0
-    nominal_horizon_time: float = 1.5    # MPCC prediction horizon [s]
-    backup_horizon_time: float = 3.0     # Backup trajectory horizon [s]
+    nominal_horizon_time: float = 4.0    # MPCC prediction horizon [s]
+    backup_horizon_time: float = 5.0     # Backup trajectory horizon [s]
     event_offset: float = 0.1            # Gatekeeper re-evaluation interval [s]
     safety_margin: float = 1.5           # Collision checking margin [m]
     initial_velocity: float = 10.0        # Starting velocity [m/s]
@@ -160,9 +161,11 @@ class ObstacleConfig:
     x: float = 80.0             # X position
     y: Optional[float] = None   # Y position (None = middle lane)
     theta: float = 0.0          # Heading angle
+    vx: float = 0.0             # Add: Velocity in x direction [m/s]
+    vy: float = 0.0             # Add: Velocity in y direction [m/s]
     body_length: float = 4.5
     body_width: float = 2.0
-    radius: float = 2.5         # Collision radius
+    radius: float = 1.5         # Collision radius
 
 
 # Number of obstacles options
@@ -224,11 +227,12 @@ def setup_vehicle(config: TestConfig, env: DriftingEnv, ax: plt.Axes) -> Tuple[D
     middle_lane = env.get_middle_lane_idx()
     middle_lane_y = env.get_lane_center(middle_lane)
     left_lane_y = env.get_lane_center(middle_lane - 1)
+    right_lane_y = env.get_lane_center(middle_lane + 1)
     
-    # Initial state in middle lane
+    # Initial state in top lane
     X0 = np.array([
         5.0,                        # x
-        middle_lane_y,              # y
+        left_lane_y ,              # y
         np.deg2rad(0),              # theta
         0, 0,                       # r, beta
         config.simulation.initial_velocity,  # V
@@ -238,7 +242,7 @@ def setup_vehicle(config: TestConfig, env: DriftingEnv, ax: plt.Axes) -> Tuple[D
     robot_spec = config.vehicle.to_dict()
     car = DriftingCar(X0, robot_spec, config.simulation.dt, ax)
     
-    return car, X0, middle_lane_y, left_lane_y
+    return car, X0, middle_lane_y, left_lane_y, right_lane_y
 
 
 def setup_controllers(
@@ -247,26 +251,27 @@ def setup_controllers(
     env: DriftingEnv,
     middle_lane_y: float,
     left_lane_y: float,
+    right_lane_y: float,
     ax: plt.Axes
 ) -> Tuple[MPCC, Union[Gatekeeper, MPS]]:
     """Setup MPCC and shielding controller (Gatekeeper or MPS)."""
     sim = config.simulation
     robot_spec = config.vehicle.to_dict()
     
-    # Reference path along middle lane
+    # Reference path along top lane
     ref_x = env.centerline[:, 0]
-    ref_y = np.full_like(ref_x, middle_lane_y)
+    ref_y = np.full_like(ref_x, left_lane_y)
     
     # MPCC controller
     nominal_horizon_steps = int(sim.nominal_horizon_time / sim.dt)
     mpcc = MPCC(car, car.robot_spec, horizon=nominal_horizon_steps)
     mpcc.set_reference_path(ref_x, ref_y)
     mpcc.set_cost_weights(
-        Q_c=30.0,       # Contouring error (reduced - less aggressive correction)
-        Q_l=1.0,        # Lag error
+        Q_c=1000.0,       # Contouring error (reduced - less aggressive correction)
+        Q_l=0.5,        # Lag error
         Q_theta=20.0,   # Heading error (reduced)
-        Q_v=50.0,       # Velocity tracking
-        Q_r=80.0,       # Yaw rate penalty (increased - more damping)
+        Q_v=80.0,       # Velocity tracking
+        Q_r=50000.0,       # Yaw rate penalty (increased - more damping)
         v_ref=sim.target_velocity,
         R=np.array([300.0, 0.5, 0.1]),  # Steering rate penalty increased for smoother control
     )
@@ -279,7 +284,7 @@ def setup_controllers(
         print(f"  Using STOPPING backup controller")
     else:  # 'lane_change' (default)
         backup_controller = LaneChangeController(car.robot_spec, sim.dt, direction='left')
-        backup_target = left_lane_y
+        backup_target = right_lane_y
         print(f"  Using LANE CHANGE backup controller (target y={left_lane_y:.2f})")
     
     # Shielding algorithm - choose based on config
@@ -341,9 +346,11 @@ def setup_obstacles_and_puddles(
             'body_width': obs.body_width,
             'a': 1.4, 'b': 1.4,
             'radius': obs.radius,
+            'vx': obs.vx,
+            'vy': obs.vy,
         }
         env.add_obstacle_car(x=obs.x, y=obs_y, theta=obs.theta, robot_spec=obstacle_spec)
-        print(f"  Obstacle {i+1}: x={obs.x:.1f}, y={obs_y:.1f}")
+        print(f"  Obstacle {i+1}: x={obs.x:.1f}, y={obs_y:.1f}, vx={obs.vx:.1f}, vy={obs.vy:.1f}")
     
     # Add puddles
     for puddle in config.puddles:
@@ -368,10 +375,13 @@ def setup_visualization(
     # Dynamic visualization
     ref_horizon_line, = ax.plot([], [], 'y-', linewidth=3, alpha=0.9, label='MPCC horizon')
     mpc_pred_line, = ax.plot([], [], 'r--', linewidth=2, alpha=0.8, label='MPCC prediction')
+
+    # ADD THIS: Actual trajectory line
+    actual_trajectory_line, = ax.plot([], [], 'b-', linewidth=2, alpha=0.7, label='Actual trajectory')
     
     ax.legend(loc='upper right', fontsize=8)
     
-    return ref_horizon_line, mpc_pred_line
+    return ref_horizon_line, mpc_pred_line, actual_trajectory_line
 
 
 # =============================================================================
@@ -387,6 +397,7 @@ def run_simulation(
     simulator: DriftingCarSimulator,
     ref_horizon_line,
     mpc_pred_line,
+    actual_trajectory_line,
     ax: plt.Axes,
     fig: plt.Figure,
     animation_saver: Optional[AnimationSaver] = None,
@@ -398,6 +409,9 @@ def run_simulation(
     num_steps = int(sim.tf / sim.dt)
     window_size = (60, 30)
     last_friction = robot_spec['mu']
+
+    trajectory_x = []
+    trajectory_y = []
     
     # Statistics
     nominal_steps = 0
@@ -410,6 +424,23 @@ def run_simulation(
     for step in range(num_steps):
         state = car.get_state()
         pos = car.get_position()
+
+        # Update obstacle positions
+        for obs in env.obstacles:
+            if 'vx' in obs['spec'] and 'vy' in obs['spec']:
+                obs['x'] += obs['spec']['vx'] * sim.dt
+                obs['y'] += obs['spec']['vy'] * sim.dt
+
+        # Redraw all obstacles at their new positions
+        if len(env.obstacles) > 0:
+            # Remove old obstacle patches
+            for patch in env.obstacle_patches:
+                patch.remove()
+            env.obstacle_patches.clear()
+            
+            # Redraw all obstacles at updated positions
+            for obs in env.obstacles:
+                env._draw_obstacle_car(obs)
         
         # Update friction based on position (puddle check)
         current_friction = env.get_friction_at_position(pos, default_friction=robot_spec['mu'])
@@ -453,13 +484,21 @@ def run_simulation(
         pred_states_viz, _ = mpcc.get_predictions()
         if pred_states_viz is not None:
             mpc_pred_line.set_data(pred_states_viz[0, :], pred_states_viz[1, :])
+
+        trajectory_x.append(pos[0])
+        trajectory_y.append(pos[1])
+        actual_trajectory_line.set_data(trajectory_x, trajectory_y)
         
-        env.update_plot_frame(ax, pos, window_size=window_size)
+        # env.update_plot_frame(ax, pos, window_size=window_size)
         simulator.draw_plot(pause=0.001)
         
         # Save animation frame
         if animation_saver is not None:
             animation_saver.save_frame(fig)
+
+            # Also save as SVG
+            svg_path = os.path.join(animation_saver.output_dir, f"frame_{step:05d}.svg")
+            fig.savefig(svg_path, format='svg')
         
         # Status output
         if step % 50 == 0:
@@ -481,7 +520,7 @@ def run_simulation(
             break
         
         # End if reached track end
-        if pos[0] > env.track_length - 10:
+        if pos[0] > env.track_length - 40:
             print("\nReached end of track!")
             break
     
@@ -511,10 +550,10 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
     
     # Setup
     env, ax, fig = setup_environment(config)
-    car, X0, middle_lane_y, left_lane_y = setup_vehicle(config, env, ax)
-    mpcc, shielding = setup_controllers(config, car, env, middle_lane_y, left_lane_y, ax)
+    car, X0, middle_lane_y, left_lane_y, right_lane_y = setup_vehicle(config, env, ax)
+    mpcc, shielding = setup_controllers(config, car, env, middle_lane_y, left_lane_y, right_lane_y, ax)
     setup_obstacles_and_puddles(config, env, middle_lane_y, left_lane_y)
-    ref_horizon_line, mpc_pred_line = setup_visualization(ax, env, middle_lane_y, left_lane_y)
+    ref_horizon_line, mpc_pred_line, actual_trajectory_line = setup_visualization(ax, env, middle_lane_y, left_lane_y)
     
     simulator = DriftingCarSimulator(car, env, show_animation=True)
     
@@ -539,12 +578,13 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
     # Run simulation
     results = run_simulation(
         config, car, env, mpcc, shielding, simulator,
-        ref_horizon_line, mpc_pred_line, ax, fig, animation_saver
+        ref_horizon_line, mpc_pred_line, actual_trajectory_line, ax, fig, animation_saver
     )
     
     # Export video if animation was saved
     if animation_saver is not None:
         animation_saver.export_video(output_name=f"{config.name.lower().replace(' ', '_')}.mp4")
+        print(f"Video and SVG frames saved in: {animation_saver.output_dir}/")
     
     # Print results
     print("\n" + "-" * 50)
@@ -585,8 +625,8 @@ def create_high_friction_test() -> TestConfig:
         vehicle=VehicleConfig(mu=1.0),  # High friction
         simulation=SimulationConfig(),
         obstacles=[
-            ObstacleConfig(x=80.0, y=None),       # First obstacle in middle lane
-            ObstacleConfig(x=85.0, y=None),       # Second obstacle in left lane (y=None uses default)
+            ObstacleConfig(x=30.0, y=None, vx=3.0, vy=0.0),       # First obstacle in middle lane
+            ObstacleConfig(x=85.0, y=None, vx=10.0, vy=0.0),       # Second obstacle in left lane (y=None uses default)
         ],
         puddles=[],  # No puddles
         expected_collision=False,
@@ -602,8 +642,8 @@ def create_low_friction_test() -> TestConfig:
         vehicle=VehicleConfig(mu=0.3),  # Low friction everywhere
         simulation=SimulationConfig(),
         obstacles=[
-            ObstacleConfig(x=80.0, y=None),       # First obstacle in middle lane
-            ObstacleConfig(x=85.0, y=None),       # Second obstacle in left lane
+            ObstacleConfig(x=80.0, y=None, vx=5.0, vy=0.0),       # First obstacle in middle lane
+            ObstacleConfig(x=85.0, y=None, vx=5.0, vy=0.0),       # Second obstacle in left lane
         ],
         puddles=[],  # No puddles - friction is globally low
         expected_collision=False,
@@ -625,8 +665,8 @@ def create_puddle_surprise_test() -> TestConfig:
         vehicle=VehicleConfig(mu=1.0),  # Start with high friction
         simulation=SimulationConfig(),
         obstacles=[
-            ObstacleConfig(x=80.0, y=None),       # First obstacle in middle lane
-            ObstacleConfig(x=85.0, y=None),       # Second obstacle in left lane
+            ObstacleConfig(x=80.0, y=None, vx=5.0, vy=0.0),       # First obstacle in middle lane
+            ObstacleConfig(x=85.0, y=None, vx=5.0, vy=0.0),       # Second obstacle in left lane
         ],
         puddles=[
             # Large puddle right in front of obstacle

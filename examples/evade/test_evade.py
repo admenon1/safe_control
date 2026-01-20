@@ -32,6 +32,7 @@ import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Union
+import os
 
 from safe_control.envs.evade_env import EvadeEnv
 from safe_control.robots.double_integrator2D import DoubleIntegrator2D
@@ -192,7 +193,7 @@ class RobotVisualizer:
         # Trail
         self.trail_x = []
         self.trail_y = []
-        self.trail, = ax.plot([], [], 'orange', linewidth=1, alpha=0.5, zorder=5)
+        self.trail, = ax.plot([], [], 'b-', linewidth=1.5, alpha=0.7, zorder=5, label='Actual trajectory')
     
     def update(self, state):
         """Update robot visualization."""
@@ -210,9 +211,9 @@ class RobotVisualizer:
         # Update trail
         self.trail_x.append(x)
         self.trail_y.append(y)
-        if len(self.trail_x) > 200:
-            self.trail_x.pop(0)
-            self.trail_y.pop(0)
+        # if len(self.trail_x) > 200:
+        #     self.trail_x.pop(0)
+        #     self.trail_y.pop(0)
         self.trail.set_data(self.trail_x, self.trail_y)
 
 
@@ -410,14 +411,18 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
         
         # Update visualization
         robot_viz.update(state)
-        env.update_plot_frame(ax, pos, window_size=(35, 18))
+        # env.update_plot_frame(ax, pos, window_size=(35, 18))
         
         plt.pause(0.001)
         fig.canvas.flush_events()
         
         # Save animation frame
         if animation_saver is not None:
-             animation_saver.save_frame(fig)
+            animation_saver.save_frame(fig)
+
+            # Also save as SVG
+            svg_path = os.path.join(animation_saver.output_dir, f"frame_{step:05d}.svg")
+            fig.savefig(svg_path, format='svg')             
              
         # Check collision
         collision, _ = env.check_obstacle_collision(pos, config.robot.radius)
