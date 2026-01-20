@@ -84,7 +84,7 @@ BACKUP_TYPES = ['lane_change', 'stop']
 class TrackConfig:
     """Track configuration parameters."""
     track_type: str = 'straight'
-    track_length: float = 120.0
+    track_length: float = 140.0
     lane_width: float = 4.0
     num_lanes: int = 5
 
@@ -267,13 +267,13 @@ def setup_controllers(
     mpcc = MPCC(car, car.robot_spec, horizon=nominal_horizon_steps)
     mpcc.set_reference_path(ref_x, ref_y)
     mpcc.set_cost_weights(
-        Q_c=10.0,       # Contouring error (reduced - less aggressive correction)
-        Q_l=0.5,        # Lag error
-        Q_theta=20.0,   # Heading error (reduced)
+        Q_c=5.0,       # Contouring error (reduced - less aggressive correction)
+        Q_l=0.3,        # Lag error
+        Q_theta=15.0,   # Heading error (reduced)
         Q_v=80.0,       # Velocity tracking
-        Q_r=1000.0,       # Yaw rate penalty (increased - more damping)
+        Q_r=1500.0,       # Yaw rate penalty (increased - more damping)
         v_ref=sim.target_velocity,
-        R=np.array([300.0, 0.5, 0.1]),  # Steering rate penalty increased for smoother control
+        R=np.array([400.0, 0.5, 0.1]),  # Steering rate penalty increased for smoother control
     )
     mpcc.set_progress_rate(sim.target_velocity)
     
@@ -489,7 +489,7 @@ def run_simulation(
         trajectory_y.append(pos[1])
         actual_trajectory_line.set_data(trajectory_x, trajectory_y)
         
-        env.update_plot_frame(ax, pos, window_size=window_size)
+        # env.update_plot_frame(ax, pos, window_size=window_size)
         simulator.draw_plot(pause=0.001)
         
         # Save animation frame
