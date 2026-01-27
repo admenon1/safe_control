@@ -33,6 +33,7 @@ from matplotlib.patches import Circle
 from dataclasses import dataclass, field
 from typing import Optional, Dict, Any, List, Union
 import os
+import csv
 
 from safe_control.envs.evade_env import EvadeEnv
 from safe_control.robots.double_integrator2D import DoubleIntegrator2D
@@ -375,6 +376,10 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
     goal_reached = False
     nominal_steps = 0
     backup_steps = 0
+
+    # NEW: Track h values over time (for BackupCBF)
+    time_data = []
+    h_overall_data = []
     
     print(f"\nRunning simulation for {config.simulation.tf}s...")
     print(f"  Bullet speed: {config.env.bullet_speed} m/s")
@@ -395,6 +400,12 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
             backup_steps += 1
         else:
             nominal_steps += 1
+
+        # Record h values (for backup cbf)
+        if config.algo_type == 'backupcbf':
+            status = shielding.get_status()
+            time_data.append(step * config.simulation.dt)
+            h_overall_data.append(status.get('h_overall', np.nan))
         
         # Apply control (double integrator dynamics)
         state = dynamics.step(state, control)
@@ -411,7 +422,7 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
         
         # Update visualization
         robot_viz.update(state)
-        # env.update_plot_frame(ax, pos, window_size=(35, 18))
+        env.update_plot_frame(ax, pos, window_size=(35, 18))
         
         plt.pause(0.001)
         fig.canvas.flush_events()
@@ -472,6 +483,8 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
         'backup_steps': backup_steps,
         'nominal_ratio': nominal_steps / max(total_steps, 1),
         'backup_ratio': backup_steps / max(total_steps, 1),
+        'time_data': time_data,
+        'h_overall_data': h_overall_data,
     }
     
     print("\n" + "-" * 50)
@@ -493,6 +506,52 @@ def run_simulation(config: TestConfig, animation_saver: Optional['AnimationSaver
     
     return results
 
+def save_h_plot_and_csv(results: Dict[str, Any], config: TestConfig, output_dir: str = None):
+    """Plot h(t) and save as CSV."""
+    if 'time_data' not in results or len(results['time_data']) == 0:
+        print("No h-value data to plot (not using BackupCBF)")
+        return
+    
+    # Create output directory
+    if output_dir is None:
+        safe_name = config.name.lower().replace(' ', '_').replace(',', '').replace('(', '').replace(')', '')
+        output_dir = f"output/h_plots/{safe_name}"
+    
+    os.makedirs(output_dir, exist_ok=True)
+    
+    time = np.array(results['time_data'])
+    h_overall = np.array(results['h_overall_data'])
+    
+    # Save to CSV
+    csv_path = os.path.join(output_dir, 'h_values.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time', 'h_overall'])
+        for t, h in zip(time, h_overall):
+            writer.writerow([t, h])
+    print(f"  CSV saved: {csv_path}")
+    
+    # Plot h(t)
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(time, h_overall, 'b-', linewidth=2.5)
+    ax.axhline(y=0, color='r', linestyle='--', linewidth=2)
+    
+    ax.set_xlabel('Time [s]', fontsize=14)
+    ax.set_ylabel('h(t)', fontsize=14)
+    ax.set_title(f'h(t) = min{{min h^C, h^S}} - {config.name}', fontsize=16)
+    ax.grid(True, alpha=0.3)
+    
+    # Save plot
+    plot_path = os.path.join(output_dir, 'h_plot.png')
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"  Plot saved: {plot_path}")
+
+    # Also save as SVG
+    svg_plot_path = os.path.join(output_dir, 'h_plot.svg')
+    fig.savefig(svg_plot_path, format='svg', bbox_inches='tight')
+    print(f"  SVG plot saved: {svg_plot_path}")
+    
+    plt.close(fig)
 
 # =============================================================================
 # Main
@@ -524,6 +583,10 @@ def main():
         print(f"\n  Animation saving enabled -> {output_dir}/")
     
     results = run_simulation(config, animation_saver)
+
+    # Save h(t) plot and CSV for backupcbf
+    if config.algo_type == 'backupcbf':
+        save_h_plot_and_csv(results, config)
     
     return results
 

@@ -113,6 +113,10 @@ class BackupCBF:
         # Status tracking
         self._using_backup = False
         self._last_intervention = False
+
+        self._h_overall_value = None
+        self._h_min_safety_value = None
+        self._h_terminal_value = None
         
     def _setup_visualization(self):
         """Setup visualization handles."""
@@ -537,6 +541,11 @@ class BackupCBF:
         # Build constraint matrices
         G_list = []
         h_list = []
+
+        # For storing the h safety values
+        #h(t) = min{ min_{τ∈[t,t+T]} h^C(φ_τ), h^S(φ_T) }
+
+        h_safety_values = []
         
         # Safety constraints along backup horizon
         for i in range(1, self.N):
@@ -545,6 +554,7 @@ class BackupCBF:
             t_i = i * self.dt
             
             h_val = self._h_safety(x_i, t_i)
+            h_safety_values.append(h_val)
             grad_h = self._grad_h_safety(x_i, t_i)
             
             # Constraint: grad_h @ S_i @ g0 @ u >= -grad_h @ S_i @ f0 - alpha(h)
@@ -568,6 +578,18 @@ class BackupCBF:
         if np.linalg.norm(lhs) > 1e-6:
             G_list.append(lhs)
             h_list.append(rhs)
+
+        # Computing overall h value
+        if len(h_safety_values) > 0:
+            h_min_safety = min(h_safety_values)
+            h_overall = min(h_min_safety, h_terminal)
+        else:
+            h_overall = h_terminal
+
+        # Store for status reporting 
+        self._h_overall_value = h_overall
+        self._h_min_safety_value = min(h_safety_values) if len(h_safety_values) > 0 else 0.0
+        self._h_terminal_value = h_terminal
         
         # Solve QP if we have constraints
         if len(G_list) > 0:
@@ -651,6 +673,9 @@ class BackupCBF:
             'last_intervention': self._last_intervention,
             'backup_horizon': self.backup_horizon,
             'num_constraints': self.N,
+            'h_overall': getattr(self, '_h_overall_value', None),
+            'h_min_safety': getattr(self, '_h_min_safety_value', None),
+            'h_terminal': getattr(self, '_h_terminal_value', None),
         }
     
     def get_backup_trajectories(self):

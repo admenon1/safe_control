@@ -51,6 +51,7 @@ import matplotlib.pyplot as plt
 from dataclasses import dataclass
 from typing import Optional, Tuple, Dict, Any, Union
 import os
+import csv
 
 from safe_control.envs.drifting_env import DriftingEnv
 from safe_control.robots.drifting_car import DriftingCar, DriftingCarSimulator
@@ -418,7 +419,13 @@ def run_simulation(
     backup_steps = 0
     collision_occurred = False
     collision_step = None
-    
+
+    # NEW: Track h values over time
+    time_data = []
+    h_overall_data = []
+    h_safety_data = []
+    h_terminal_data = []
+        
     print(f"\nRunning simulation for {sim.tf}s...")
     
     for step in range(num_steps):
@@ -489,7 +496,7 @@ def run_simulation(
         trajectory_y.append(pos[1])
         actual_trajectory_line.set_data(trajectory_x, trajectory_y)
         
-        # env.update_plot_frame(ax, pos, window_size=window_size)
+        env.update_plot_frame(ax, pos, window_size=window_size)
         simulator.draw_plot(pause=0.001)
         
         # Save animation frame
@@ -507,6 +514,14 @@ def run_simulation(
             mode = "BACKUP" if status['using_backup'] else "NOMINAL"
             print(f"Step {step:4d}: x={pos[0]:6.2f}, y={pos[1]:6.2f}, V={V:5.2f} m/s, mode={mode}")
         
+        #Record h values (for backup cbf)
+        if config.algo_type == 'backupcbf':
+            status = shielding.get_status()
+            time_data.append(step * sim.dt)
+            h_overall_data.append(status.get('h_overall', np.nan))
+            h_safety_data.append(status.get('h_min_safety', np.nan))
+            h_terminal_data.append(status.get('h_terminal', np.nan))
+
         # Check collision
         if result['collision']:
             collision_occurred = True
@@ -534,8 +549,59 @@ def run_simulation(
         'backup_steps': backup_steps,
         'nominal_ratio': nominal_steps / max(total_steps, 1),
         'backup_ratio': backup_steps / max(total_steps, 1),
+        'time_data': time_data,
+        'h_overall_data': h_overall_data,
+        'h_safety_data': h_safety_data,
+        'h_terminal_data': h_terminal_data,
     }
 
+def save_h_plot_and_csv(results: Dict[str, Any], config: TestConfig, output_dir: str = None):
+    """Plot h(t) and save as CSV."""
+    if 'time_data' not in results or len(results['time_data']) == 0:
+        print("No h-value data to plot (not using BackupCBF)")
+        return
+    
+    # Create output directory
+    if output_dir is None:
+        safe_name = config.name.lower().replace(' ', '_').replace(',', '').replace('(', '').replace(')', '')
+        output_dir = f"output/h_plots/{safe_name}"
+    
+    import os
+    os.makedirs(output_dir, exist_ok=True)
+    
+    time = np.array(results['time_data'])
+    h_overall = np.array(results['h_overall_data'])
+    
+    # Save to CSV
+    csv_path = os.path.join(output_dir, 'h_values.csv')
+    with open(csv_path, 'w', newline='') as f:
+        writer = csv.writer(f)
+        writer.writerow(['time', 'h_overall'])
+        for t, h in zip(time, h_overall):
+            writer.writerow([t, h])
+    print(f"  CSV saved: {csv_path}")
+    
+    # Minimal plot
+    fig, ax = plt.subplots(figsize=(10, 6))
+    ax.plot(time, h_overall, 'b-', linewidth=2.5)
+    ax.axhline(y=0, color='r', linestyle='--', linewidth=2)
+    
+    ax.set_xlabel('Time [s]', fontsize=14)
+    ax.set_ylabel('h(t)', fontsize=14)
+    ax.set_title(f'h(t) = min{{min h^C, h^S}}', fontsize=16)
+    ax.grid(True, alpha=0.3)
+    
+    # Save plot
+    plot_path = os.path.join(output_dir, 'h_plot.png')
+    fig.savefig(plot_path, dpi=150, bbox_inches='tight')
+    print(f"  Plot saved: {plot_path}")
+
+    # Also save as SVG
+    svg_plot_path = os.path.join(output_dir, 'h_plot.svg')
+    fig.savefig(svg_plot_path, format='svg', bbox_inches='tight')
+    print(f"  SVG plot saved: {svg_plot_path}")
+        
+    plt.close(fig)
 
 # =============================================================================
 # Main Test Runner
@@ -586,6 +652,10 @@ def run_test(config: TestConfig) -> Dict[str, Any]:
         animation_saver.export_video(output_name=f"{config.name.lower().replace(' ', '_')}.mp4")
         print(f"Video and SVG frames saved in: {animation_saver.output_dir}/")
     
+    # Save h(t) plot and CSV for backupcbf
+    if config.algo_type == 'backupcbf':
+        save_h_plot_and_csv(results, config)
+
     # Print results
     print("\n" + "-" * 50)
     print("Results:")
